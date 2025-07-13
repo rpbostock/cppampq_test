@@ -9,15 +9,15 @@
 
 using namespace AMQP;
 
-class MyAmqpController {
+class MyAmqpControllerExample {
 public:
-	MyAmqpController()
+	MyAmqpControllerExample()
 	{
 		evbase = event_base_new();
 		handler = std::make_unique<AMQP::LibEventHandler>(evbase);
 		connection = std::make_unique<AMQP::TcpConnection>(handler.get(), AMQP::Address("amqp://guest:guest@localhost/"));
 	}
-	~MyAmqpController()
+	~MyAmqpControllerExample()
 	{
 
 	}
