@@ -2,9 +2,12 @@
 #include <iostream>
 #include <memory>
 
-#include "amqpcpp/address.h"
-#include "amqpcpp/libevent.h"
+#include <amqpcpp.h>
+#include <amqpcpp/address.h>
+#include <amqpcpp/libevent.h>
+#include <amqpcpp/table.h>
 
+using namespace AMQP;
 
 class MyAmqpController {
 public:

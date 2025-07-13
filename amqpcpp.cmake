@@ -8,7 +8,6 @@ FetchContent_Declare(
   GIT_REPOSITORY "https://github.com/CopernicaMarketingSoftware/AMQP-CPP.git"
   GIT_TAG "v4.3.27"
   SOURCE_DIR  ${CMAKE_BINARY_DIR}/external/amqp-cpp
-  PATCH_COMMAND git apply --ignore-space-change --ignore-whitespace ${CMAKE_CURRENT_SOURCE_DIR}/cmake/0001-amqpcpp-include.patch || true
 )
 
 set(AMQP-CPP_LINUX_TCP ON CACHE BOOL "" FORCE)
