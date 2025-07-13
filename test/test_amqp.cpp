@@ -1,15 +1,15 @@
 #include "test_amqp.hpp"
-#include "my_amqp_controller.hpp"
+#include "my_amqp_controller_example.hpp"
 #include "my_amqp_controller_no_channel.hpp"
 
-TEST_F(TestAmqp, testStartStopWithSingleChannel_short)
+TEST_F(TestAmqp, testStartStopExampleWithSingleChannel_short)
 {
 	GTEST_LOG_(INFO) << "Start and stop one channel a thousand times.";
-	GTEST_ASSERT_TRUE(testStartStopWithSingleChannel_(1, 1));
-	GTEST_ASSERT_TRUE(testStartStopWithSingleChannel_(1000, 10));
+	GTEST_ASSERT_TRUE(testStartStopExampleWithSingleChannel_(1, 1));
+	GTEST_ASSERT_TRUE(testStartStopExampleWithSingleChannel_(1000, 10));
 }
 
-bool TestAmqp::testStartStopWithSingleChannel_(int num_repeats, int num_threads)
+bool TestAmqp::testStartStopExampleWithSingleChannel_(int num_repeats, int num_threads)
 {
 	for (int i = 0; i < num_repeats; i++)
 	{
@@ -30,14 +30,14 @@ bool TestAmqp::testStartStopWithSingleChannel_(int num_repeats, int num_threads)
 	return true;
 }
 
-TEST_F(TestAmqp, testStartStopWithNoChannel_short)
+TEST_F(TestAmqp, testStartStopExampleWithNoChannel_short)
 {
 	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
-	GTEST_ASSERT_TRUE(testStartStopWithNoChannel_(1, 1));
-	// GTEST_ASSERT_TRUE(testStartStopWithSingleChannel_(1000, 10));
+	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1, 1));
+	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1000, 10));
 }
 
-bool TestAmqp::testStartStopWithNoChannel_(int num_repeats, int num_threads)
+bool TestAmqp::testStartStopExampleWithNoChannel_(int num_repeats, int num_threads)
 {
 	for (int i = 0; i < num_repeats; i++)
 	{

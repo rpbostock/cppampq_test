@@ -20,7 +20,15 @@ public:
 	void onReady(AMQP::TcpConnection *connection) override
 	{
 		std::cout << "onReady - planning to close now" << std::endl;
-		connection->close();
+		is_ready_ = true;
 	}
+
+	bool isReady()
+	{
+		return is_ready_;
+	}
+
+private:
+	std::atomic<bool> is_ready_ {false};
 
 };
