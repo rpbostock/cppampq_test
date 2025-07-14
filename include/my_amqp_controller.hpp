@@ -2,27 +2,25 @@
 #include <iostream>
 #include <memory>
 
-#include <amqpcpp.h>
 #include <atomic>
 #include <amqpcpp/address.h>
 #include <amqpcpp/libevent.h>
-#include <amqpcpp/table.h>
+#include "channel_config.hpp"
+
+#include "my_amqp_channel.hpp"
 
 namespace rmq
 {
 
-class MyLibEventHandler : public AMQP::LibEventHandler
+class MyLibEventHandler final : public AMQP::LibEventHandler
 {
 public:
-	MyLibEventHandler(struct event_base *evbase) : LibEventHandler(evbase)
+	explicit MyLibEventHandler(struct event_base *evbase) : LibEventHandler(evbase)
 	{
 
 	}
 
-	virtual ~MyLibEventHandler()
-	{
-		// std::cout << "MyLibEventHandler::~MyLibEventHandler()" << std::endl;
-	}
+	~MyLibEventHandler() = default;
 
 	void onReady(AMQP::TcpConnection *connection) override
 	{
@@ -46,9 +44,13 @@ private:
 
 };
 
-
 class MyAmqpController {
 public:
+	using ChannelHandlerPtr = std::shared_ptr<MyAmqpChannel>;
+	using TxChannelHandlerPtr = std::shared_ptr<MyAmqpTxChannel>;
+	// using RxChannelHandlerPtr = std::shared_ptr<MyAmqpRxChannel>;
+	using TxChannelDataHandlerPtr = std::shared_ptr<MyAmqpTxChannelDataHandler>;
+	// using RxChannelDataHandlerPtr = std::shared_ptr<MyAmqpRxChannelDataHandler>;
 	explicit MyAmqpController(const std::string& address) : address_(address)
 	{
 		evbase = event_base_new();
@@ -76,7 +78,39 @@ public:
 		// std::cout << "MyAmqpController::~MyAmqpController() - done" << std::endl;
 	}
 
-	bool isConnectionReady()
+	TxChannelHandlerPtr createTransmitChannel(const ChannelConfig& config)
+	{
+		auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection.get());
+		handlers_.emplace(config.queue_name, std::make_shared<MyAmqpTxChannelDataHandler>());
+		auto tx_channel = std::make_shared<MyAmqpTxChannel>(std::move(amqp_channel)
+			, config
+			, [&config, this](const std::string &error_message) { onChannelError(config.queue_name, error_message.c_str()); }
+			, handlers_[config.queue_name]);
+		channels_.emplace(config.queue_name, tx_channel);
+		return tx_channel;
+	}
+
+
+
+	// RxChannelHandlerPtr getChannelRx(const std::string& channel_name)
+	// {
+	// 	const auto it = channels_.find(channel_name);
+	// 	if (it == channels_.end())
+	// 		return RxChannelHandlerPtr();
+	// 	return std::dynamic_pointer_cast<MyAmqpRxChannel<std::any>>(it->second);
+	// }
+
+	TxChannelHandlerPtr getChannelTx(const std::string& channel_name)
+	{
+		const auto it = channels_.find(channel_name);
+		if (it == channels_.end())
+			return TxChannelHandlerPtr();
+		return std::dynamic_pointer_cast<MyAmqpTxChannel>(it->second);
+	}
+
+
+
+	bool isConnectionReady() const
 	{
 		return handler->isReady();
 	}
@@ -114,6 +148,12 @@ public:
 		return num_reconnections.load();
 	}
 
+	// TODO Handle channel errors
+	void onChannelError(std::string channel_name, const char *message)
+	{
+
+	}
+
 private:
 	// Main connection
 	std::string address_;
@@ -125,6 +165,10 @@ private:
 	// This indicates whether we should be trying to maintain connections or not
 	std::atomic<bool> maintain_connection {true};
 	std::atomic<int> num_reconnections {0};
+
+	// Channel handling
+	std::unordered_map<std::string, ChannelHandlerPtr> channels_;
+	std::unordered_map<std::string, TxChannelDataHandlerPtr> handlers_;
 
 	// Set this to true when we have finished with processing events and cleaned up
 	std::atomic<bool> is_connection_finished_with {false};

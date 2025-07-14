@@ -104,13 +104,13 @@ bool TestAmqp::testStartStopRealNoChannel_(int num_repeats, int num_threads)
 
 TEST_F(TestAmqp, testReconnectionNoChannel_short)
 {
-	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
+	GTEST_LOG_(INFO) << "Test a single set of reconnections over a minute with a single AMQP connection";
 	GTEST_ASSERT_TRUE(testForceReconnectNoChannel_(1, 1));
 }
 
 TEST_F(TestAmqp, testReconnectionNoChannel_long)
 {
-	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
+	GTEST_LOG_(INFO) << "Test multiple sets of reconnections over a 10 minute period with a multiple AMQP connection";
 	GTEST_ASSERT_TRUE(testForceReconnectNoChannel_(10, 10));
 }
 
@@ -179,4 +179,49 @@ std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, std::chro
 		}
 	});
 	return forceClose;
+}
+
+
+
+TEST_F(TestAmqp, testTransmitChannel_short_	)
+{
+	GTEST_LOG_(INFO) << "Test that we can send some messages successfully to an exchange - no feedback at this point";
+
+	// Basic setup
+	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
+	rmq::ChannelConfig config {"testTransmitChannel_short_exchange, testTransmitChannel_short_queue, testTransmitChannel_short_routing"};
+	auto channel = controller.createTransmitChannel(config);
+	controller.start();
+
+	// Ensure we're up and running
+	auto start = std::chrono::high_resolution_clock::now();
+	while ((!controller.isConnectionReady()	|| !channel->isActive())
+		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_TRUE(controller.isConnectionReady());
+	GTEST_ASSERT_TRUE(channel->isActive());
+
+	// Send some messages
+	const auto handler = channel->getHandler();
+	constexpr size_t num_messages = 100;
+	for (size_t i=0; i<num_messages; i++)
+	{
+		std::string message = "test message " + std::to_string(i);
+		auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
+		handler->pushMessage(message_vec);
+	}
+
+	// Wait for them all to be sent
+	start = std::chrono::high_resolution_clock::now();
+	while (!handler->isEmpty()
+		&& channel->getNumberOfTransmittedMessages() != num_messages
+		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_TRUE(handler->isEmpty());
+	GTEST_ASSERT_EQ(channel->getNumberOfTransmittedMessages(), num_messages);
+
 }

@@ -11,6 +11,7 @@ include(gtest.cmake)
 include(amqpcpp.cmake)
 
 find_package(PkgConfig REQUIRED)
+find_package(Boost 1.74.0 EXACT REQUIRED COMPONENTS log log_setup)
 pkg_check_modules(LIBEVENT REQUIRED libevent)
 
 find_package(Event REQUIRED)
@@ -20,6 +21,7 @@ endif()
 
 # Add the executable
 add_executable(cppampq_test
+  src/logging.cpp
   test/main.cpp
   test/test_amqp.cpp
 )
@@ -35,6 +37,7 @@ target_include_directories(cppampq_test PRIVATE
 target_link_libraries(cppampq_test PRIVATE
   amqpcpp
   ${Event_LIBRARIES}
+  ${Boost_LIBRARIES}
   gtest
   gtest_main
   pthread

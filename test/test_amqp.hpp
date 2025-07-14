@@ -25,13 +25,17 @@ private:
 	// Force connections to close
 	std::thread forceCloseConnections(std::atomic<bool>& finish, std::chrono::milliseconds& interval);
 
-	// Workup of real classes to be used in production
+	// Verification of start stop behaviour on the core connection and handler (excludes channels)
 	static bool testStartStopRealNoChannel_(int num_repeats, int num_threads);
 	bool testForceReconnectNoChannel_(int num_repeats, int num_threads);
 	FRIEND_TEST(TestAmqp, testStartStopRealNoChannel_short);
 	FRIEND_TEST(TestAmqp, testStartStopRealNoChannel_long);
 	FRIEND_TEST(TestAmqp, testReconnectionNoChannel_short);
 	FRIEND_TEST(TestAmqp, testReconnectionNoChannel_long);
+
+	// Verification of purely transmit items
+	FRIEND_TEST(TestAmqp, testTransmitChannel_short_);
+
 
 	// Example tests looking at specific core functionality and stability
 	static bool testStartStopExampleWithSingleChannel_(int num_repeats, int num_threads);
