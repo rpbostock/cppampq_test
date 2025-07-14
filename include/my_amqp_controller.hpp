@@ -31,7 +31,13 @@ public:
 	void onError(TcpConnection *connection, const char *message) override
 	{
 		std::cout << "onError - connection error: " << message << std::endl;
+		is_error_ = true;
 		connection->close();
+	}
+
+	bool isError() const
+	{
+		return is_error_.load();
 	}
 
 	bool isReady() const
@@ -41,6 +47,7 @@ public:
 
 private:
 	std::atomic<bool> is_ready_ {false};
+	std::atomic<bool> is_error_ {false};
 
 };
 
@@ -115,6 +122,11 @@ public:
 		return handler->isReady();
 	}
 
+	bool isConnectionError() const
+	{
+		return handler->isError();
+	}
+
 	void start()
 	{
 		maintain_connection_thread = std::thread(&MyAmqpController::run, this);
@@ -151,7 +163,15 @@ public:
 	// TODO Handle channel errors
 	void onChannelError(std::string channel_name, const char *message)
 	{
+		// Check if the connection has an error or not - if we do then we need to handle that and not this
+		if (isConnectionError())
+		{
+			LOG_ERROR("Already handling connection error when we received a channel error: " + std::string(message) + " on channel " + channel_name);
+		}
+		else
+		{
 
+		}
 	}
 
 private:

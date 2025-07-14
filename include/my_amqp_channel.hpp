@@ -10,15 +10,29 @@ namespace rmq {
 class MyAmqpChannel
 {
 public:
-	MyAmqpChannel(std::unique_ptr<AMQP::TcpChannel> tcp_channel
-		, const ChannelConfig& channel_config
+	MyAmqpChannel(const ChannelConfig& channel_config
 		, std::function<void(const std::string &)> error_callback) :
-		tcp_channel_(std::move(tcp_channel))
-		,channel_config_(channel_config)
+		channel_config_(channel_config)
 		, on_error_callback_(std::move(error_callback))
+	{}
+	virtual ~MyAmqpChannel() = default;
+	virtual void deactivate() = 0;
+
+
+protected:
+	/**
+	 * This is called when constructed or after handling an error
+	 * @param tcp_channel
+	 */
+	virtual void setupBaseTcpChannel()
 	{
-		// All channels need to handle errors
 		std::lock_guard lock(tcp_channel_mutex_);
+		if (!tcp_channel_)
+		{
+			throw std::runtime_error("TCP channel is not set up!");
+		}
+
+		// All channels need to handle errors
 		tcp_channel_->onError([this](const char *message)
 						  {
 							  LOG_ERROR("(MyAmqpChannel) Channel error: " << message);
@@ -28,11 +42,11 @@ public:
 						  });
 
 		// All channels need to connect to an exchange
-		auto exchange_name = channel_config.exchange_name;
+		auto exchange_name = channel_config_.exchange_name;
 		if (!exchange_name.empty())
 		{
 			LOG_INFO("(MyAmqpChannel) Declaring exchange '" << exchange_name << "'");
-			tcp_channel_->declareExchange(exchange_name, channel_config.exchange_type, AMQP::durable)
+			tcp_channel_->declareExchange(exchange_name, channel_config_.exchange_type, AMQP::durable)
 						.onSuccess([this, exchange_name]()
 						{
 							LOG_DEBUG("(MyAmqpChannel) Exchange '" << exchange_name << "' declared successfully.");
@@ -53,10 +67,7 @@ public:
 			throw std::runtime_error("Exchange name is empty! Not possible to declare exchange.");
 		}
 	}
-	virtual ~MyAmqpChannel() = default;
-	virtual void deactivate() = 0;
 
-protected:
 	const ChannelConfig channel_config_;
 
 	// Handling the TCP Channel - not naturally thread safe so take care
@@ -78,30 +89,22 @@ public:
 	                , const ChannelConfig &channel_config
 	                , std::function<void(const std::string &)> error_callback
 	                , std::shared_ptr<MyAmqpTxChannelDataHandler> data_handler) :
-	MyAmqpChannel(std::move(tcp_channel)
-		, channel_config
+	MyAmqpChannel(channel_config
 		, std::move(error_callback))
 		, data_handler_(std::move(data_handler))
 	{
-		// We need to know when we are ready to send more data, and be able to handle acknowledgements
-		tcp_channel_->confirmSelect().onSuccess([this]()
-		{
-			LOG_TRACE("(MyAmqpChannel) channel in a confirm mode.");
-			is_channel_active_ = true;
-			// This occurs on the first time confirmSelect is setup
-			channel_active_cv_.notify_one();
-		});
-
-		// Handle sending new data whenever it is available
-		transmit_thread_ = std::jthread([this]()
-		{
-			this->sendData_();
-		});
+		initialise_(std::move(tcp_channel));
 	}
 
 	~MyAmqpTxChannel()
 	{
 		deactivate_();
+	}
+
+	void resetTcpChannel(std::unique_ptr<AMQP::TcpChannel> tcp_channel)
+	{
+		deactivate_();
+		initialise_(std::move(tcp_channel));
 	}
 
 	bool isActive() const
@@ -119,12 +122,33 @@ public:
 		return data_handler_;
 	}
 
-	auto getNumberOfTransmittedMessages()
+	auto getNumberOfTransmittedMessages() const
 	{
 		return numTransmitted_.load();
 	}
 
 private:
+	void initialise_(std::unique_ptr<AMQP::TcpChannel> tcp_channel)
+	{
+		tcp_channel_ = std::move(tcp_channel);
+		MyAmqpChannel::setupBaseTcpChannel();
+
+		// We need to know when we are ready to send more data, and be able to handle acknowledgements
+		tcp_channel_->confirmSelect().onSuccess([this]()
+		{
+			LOG_TRACE("(MyAmqpChannel) channel in a confirm mode.");
+			is_channel_active_ = true;
+			// This occurs on the first time confirmSelect is setup
+			channel_active_cv_.notify_one();
+		});
+
+		// Handle sending new data whenever it is available
+		transmit_thread_ = std::jthread([this]()
+		{
+			this->sendData_();
+		});
+	}
+
 	void deactivate_()
 	{
 		if (is_channel_active_.load() == true)
