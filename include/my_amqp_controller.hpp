@@ -51,15 +51,68 @@ private:
 
 };
 
+
+using ChannelListenerPtr = std::shared_ptr<ChannelListener>;
+using ChannelHandlerPtr = std::unique_ptr<MyAmqpChannel>;
+class MyAmqpTxChannelInfo
+{
+public:
+	explicit MyAmqpTxChannelInfo(ChannelHandlerPtr channel
+		, const ChannelListenerPtr &listener
+		, const MyTxDataQueuePtr& queue
+		, const ChannelConfig& config)
+		: channel_(std::move(channel))
+		, queue_(queue)
+		, config_(config)
+		, listener_(listener)
+	{}
+
+	void resetChannel()
+	{
+		channel_.reset();
+	}
+
+	void setChannel(ChannelHandlerPtr channel)
+	{
+		channel_.reset();
+		channel_ = std::move(channel);
+	}
+
+	[[nodiscard]] MyTxDataQueuePtr queue() const
+	{
+		return queue_;
+	}
+
+	[[nodiscard]] ChannelConfig config() const
+	{
+		return config_;
+	}
+
+	[[nodiscard]] ChannelListenerPtr listener()
+	{
+		return listener_;
+	}
+
+	void setListener(const ChannelListenerPtr& listener)
+	{
+		listener_ = listener;
+	}
+
+private:
+	ChannelHandlerPtr channel_;
+	MyTxDataQueuePtr queue_;
+	ChannelConfig config_;
+	std::shared_ptr<ChannelListener> listener_;
+};
+
 class MyAmqpController {
 public:
-	using ChannelHandlerPtr = std::shared_ptr<MyAmqpChannel>;
 	using TxChannelHandlerPtr = std::shared_ptr<MyAmqpTxChannel>;
 	explicit MyAmqpController(const std::string& address) : address_(address)
 	{
-		evbase = event_base_new();
-		handler = std::make_unique<MyLibEventHandler>(evbase);
-		connection = std::make_unique<AMQP::TcpConnection>(handler.get(), AMQP::Address(address_));
+		evbase_ = event_base_new();
+		handler_ = std::make_unique<MyLibEventHandler>(evbase_);
+		connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
 	}
 
 	~MyAmqpController()
@@ -70,7 +123,7 @@ public:
 		maintain_connection.store(false);
 
 		// Close the connection - this should also stop the event handling loop when complete
-		connection->close();
+		connection_->close();
 
 		// Wait for the connection to be finished with
 		while (!is_connection_finished_with.load())
@@ -82,45 +135,45 @@ public:
 		// std::cout << "MyAmqpController::~MyAmqpController() - done" << std::endl;
 	}
 
-	TxChannelHandlerPtr createTransmitChannel(const ChannelConfig& config)
+	void createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
 	{
-		auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection.get());
-		auto tx_channel = std::make_shared<MyAmqpTxChannel>(std::move(amqp_channel)
+		if (!listener)
+		{
+			throw std::runtime_error("Cannot accept nullptr listener");
+		}
+		if (config.exchange_name.empty())
+		{
+			throw std::runtime_error("Cannot create channel with empty exchange name");
+		}
+		auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection_.get());
+		auto queue = std::make_shared<MyTxDataQueue>(1000, QueueOverflowPolicy::WAIT); // possibly pass this in as a parameter?
+		auto tx_channel = std::make_unique<MyAmqpTxChannel>(std::move(amqp_channel)
 			, config
 			, [&config, this](const std::string &error_message) { onChannelError(config.queue_name, error_message.c_str()); }
-			, std::make_shared<MyAmqpChannel::MyTxDataQueue>(1000));
-		channels_.emplace(config.queue_name, tx_channel);
-		return tx_channel;
+			, queue
+			, listener);
+
+		channel_wrappers_.emplace(config.exchange_name, MyAmqpTxChannelInfo(std::move(tx_channel), listener, queue, config));
 	}
-
-
-
-	// RxChannelHandlerPtr getChannelRx(const std::string& channel_name)
-	// {
-	// 	const auto it = channels_.find(channel_name);
-	// 	if (it == channels_.end())
-	// 		return RxChannelHandlerPtr();
-	// 	return std::dynamic_pointer_cast<MyAmqpRxChannel<std::any>>(it->second);
-	// }
-
-	TxChannelHandlerPtr getChannelTx(const std::string& channel_name)
-	{
-		const auto it = channels_.find(channel_name);
-		if (it == channels_.end())
-			return TxChannelHandlerPtr();
-		return std::dynamic_pointer_cast<MyAmqpTxChannel>(it->second);
-	}
-
-
-
+	
 	bool isConnectionReady() const
 	{
-		return handler->isReady();
+		return handler_->isReady();
+	}
+
+	bool isChannelReady(const std::string& channel_name)
+	{
+		const auto it = channel_wrappers_.find(channel_name);
+		if (it == channel_wrappers_.end())
+		{
+			return false;
+		}
+		return it->second.listener()->isActive();
 	}
 
 	bool isConnectionError() const
 	{
-		return handler->isError();
+		return handler_->isError();
 	}
 
 	void start()
@@ -133,19 +186,41 @@ public:
 	{
 		while (maintain_connection.load())
 		{
-			event_base_dispatch(evbase);
+			event_base_dispatch(evbase_);
 
 			if (maintain_connection.load())
 			{
+				// Stop the channels
+				for (auto& channel_wrapper : channel_wrappers_)
+				{
+					// Get rid of the old channel info that is now no longer working and will be connected to an obsolete connection
+					channel_wrapper.second.resetChannel();
+				}
+
 				// Set up a new connection
 				std::cout << "Reconnecting to " << address_ << std::endl;
-				handler = std::make_unique<MyLibEventHandler>(evbase);
-				connection = std::make_unique<AMQP::TcpConnection>(handler.get(), AMQP::Address(address_));
+				handler_ = std::make_unique<MyLibEventHandler>(evbase_);
+				connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
+				for (auto& channel_wrapper : channel_wrappers_)
+				{
+					// Create a new channel and connect it to the new connection
+					auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection_.get());
+					auto tx_channel = std::make_unique<MyAmqpTxChannel>(
+						std::move(amqp_channel)
+						, channel_wrapper.second.config()
+						, [&channel_wrapper, this](const std::string &error_message) { onChannelError(channel_wrapper.first, error_message.c_str()); }
+						, channel_wrapper.second.queue()
+						, channel_wrapper.second.listener()
+						, channel_wrapper.second.listener()->getNumberOfTransmittedMessages()
+						);
+					channel_wrapper.second.setChannel(std::move(tx_channel));
+				}
+
 				++num_reconnections;
 				std::cout << "Finished reconnecting to " << address_ << std::endl;
 			}
 		}
-		event_base_free(evbase);
+		event_base_free(evbase_);
 
 		// We need to let the deconstructor know that we are done with all the event bits
 		is_connection_finished_with.store(true);
@@ -157,25 +232,28 @@ public:
 	}
 
 	// TODO Handle channel errors
-	void onChannelError(std::string channel_name, const char *message)
+	void onChannelError(const std::string& channel_name, const char *message) const
 	{
-		// Check if the connection has an error or not - if we do then we need to handle that and not this
-		if (isConnectionError())
-		{
-			LOG_ERROR("Already handling connection error when we received a channel error: " + std::string(message) + " on channel " + channel_name);
-		}
-		else
-		{
+		// Force a reconnection and restart of all the channels - from experience just restarting the affected channel doesn't work
+		connection_->close();
+	}
 
+	MyTxDataQueuePtr getQueue(const std::string& channel_name)
+	{
+		const auto it = channel_wrappers_.find(channel_name);
+		if (it == channel_wrappers_.end())
+		{
+			return nullptr;
 		}
+		return it->second.queue();
 	}
 
 private:
 	// Main connection
 	std::string address_;
-	struct event_base *evbase;
-	std::unique_ptr<MyLibEventHandler> handler;
-	std::unique_ptr<AMQP::TcpConnection> connection;
+	struct event_base *evbase_;
+	std::unique_ptr<MyLibEventHandler> handler_;
+	std::unique_ptr<AMQP::TcpConnection> connection_;
 
 	std::thread maintain_connection_thread;
 	// This indicates whether we should be trying to maintain connections or not
@@ -183,7 +261,7 @@ private:
 	std::atomic<int> num_reconnections {0};
 
 	// Channel handling
-	std::unordered_map<std::string, ChannelHandlerPtr> channels_;
+	std::unordered_map<std::string, MyAmqpTxChannelInfo> channel_wrappers_;
 
 	// Set this to true when we have finished with processing events and cleaned up
 	std::atomic<bool> is_connection_finished_with {false};

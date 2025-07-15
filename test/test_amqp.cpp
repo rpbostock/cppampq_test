@@ -160,14 +160,15 @@ bool TestAmqp::testForceReconnectNoChannel_(int num_repeats, int num_threads)
 	return enough_reconnections.load();
 }
 
-std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, std::chrono::milliseconds& interval)
+std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval)
 {
 	std::atomic<int> rc(0);
 	std::thread forceClose([&interval, &finish, &rc]() {
 		while (finish.load() == false)
 		{
 			std::this_thread::sleep_for(interval);
-			rc = system("rabbitmqadmin -f tsv -q list connections name | cut -f1 | xargs -I {} rabbitmqadmin -q close connection name={}");
+			LOG_INFO("Forcing close of connections by timer interval after delay of " << interval.count() << "ms");
+			rc = forceCloseConnections_();
 			if (rc == 0)
 			{
 				GTEST_LOG_(INFO) << "All connections closed.";
@@ -181,15 +182,22 @@ std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, std::chro
 	return forceClose;
 }
 
+int TestAmqp::forceCloseConnections_()
+{
+	LOG_INFO("Disconnecting all connections");
+	return system("rabbitmqadmin -f tsv -q list connections name | cut -f1 | xargs -I {} rabbitmqadmin -q close connection name={}");
+}
 
 
-TEST_F(TestAmqp, testTransmitChannel_short_	)
+
+
+TEST_F(TestAmqp, testTransmitChannel_short	)
 {
 	GTEST_LOG_(INFO) << "Test that we can send some messages successfully to an exchange - no feedback at this point";
 	testTransmitChannel_(100);
 }
 
-TEST_F(TestAmqp, testTransmitChannel_long_	)
+TEST_F(TestAmqp, testTransmitChannel_long	)
 {
 	GTEST_LOG_(INFO) << "Test that we can send 1M messages successfully to an exchange - no feedback at this point";
 	testTransmitChannel_(1E6);
@@ -201,22 +209,25 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages)
 {
 	// Basic setup
 	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
-	rmq::ChannelConfig config {"testTransmitChannel_short_exchange, testTransmitChannel_short_queue, testTransmitChannel_short_routing"};
-	auto channel = controller.createTransmitChannel(config);
+	rmq::ChannelConfig config {"testTransmitChannel_short_exchange", "testTransmitChannel_short_queue", "testTransmitChannel_short_routing"};
+	auto channel_listener = std::make_shared<rmq::ChannelListener>();
+	controller.createTransmitChannel(config, channel_listener);
 	controller.start();
 
 	// Ensure we're up and running
 	auto start = std::chrono::high_resolution_clock::now();
-	while ((!controller.isConnectionReady()	|| !channel->isActive())
+	while ((!controller.isConnectionReady()	|| !channel_listener->isActive())
 		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
 	GTEST_ASSERT_TRUE(controller.isConnectionReady());
-	GTEST_ASSERT_TRUE(channel->isActive());
+	GTEST_ASSERT_TRUE(channel_listener->isActive());
 
 	// Send some messages
-	const auto queue = channel->getHandler();
+	const auto queue = controller.getQueue(config.exchange_name);
+	GTEST_ASSERT_TRUE(queue != nullptr);
+
 	std::atomic<bool> send_complete(false);
 	std::jthread send_thread([&queue, &send_complete, num_messages]()
 	{
@@ -232,14 +243,86 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages)
 	// Wait for them all to be sent
 	start = std::chrono::high_resolution_clock::now();
 	while (!(queue->isEmpty()
-		&& channel->getNumberOfTransmittedMessages() == num_messages
+		&& channel_listener->getNumberOfTransmittedMessages() == num_messages
 		&& send_complete.load())
-		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(static_cast<int>( ceil(num_messages / 5000.0))))
+		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages))
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
 	GTEST_ASSERT_TRUE(queue->isEmpty());
 	GTEST_ASSERT_TRUE(send_complete.load());
-	GTEST_ASSERT_EQ(channel->getNumberOfTransmittedMessages(), num_messages);
+	GTEST_ASSERT_EQ(channel_listener->getNumberOfTransmittedMessages(), num_messages);
 
 }
+
+std::chrono::seconds TestAmqp::getTransmitTimeout_(const size_t num_messages)
+{
+	return std::chrono::seconds(static_cast<int>( ceil(num_messages / 5000.0)));
+}
+
+
+TEST_F(TestAmqp, testReconnectionTxChannel_short)
+{
+	GTEST_LOG_(INFO) << "Test that we can send 100k messages successfully to an exchange - no feedback at this point";
+	testTransmitChannelWithReconnect_(1000000);
+}
+
+void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
+{
+	// Basic setup
+	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
+	rmq::ChannelConfig config {"testTransmitChannel_short_exchange, testTransmitChannel_short_queue, testTransmitChannel_short_routing"};
+	auto channel_listener = std::make_shared<rmq::ChannelListener>();
+	controller.createTransmitChannel(config, channel_listener);
+	controller.start();
+
+	// Ensure we're up and running
+	auto start = std::chrono::high_resolution_clock::now();
+	while (!(controller.isConnectionReady()	&& channel_listener->isActive())
+		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_TRUE(controller.isConnectionReady());
+	GTEST_ASSERT_TRUE(channel_listener->isActive());
+
+	// // Ensure at least one reconnection occurs
+	// GTEST_ASSERT_EQ(forceCloseConnections_(), 0);
+	// std::this_thread::sleep_for(std::chrono::seconds(1));
+
+	// Send some messages
+	const auto queue = controller.getQueue(config.exchange_name);
+	std::atomic send_complete(false);
+	std::jthread send_thread([&queue, &send_complete, num_messages]()
+	{
+		for (size_t i=0; i<num_messages; i++)
+		{
+			std::string message = "test message " + std::to_string(i);
+			auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
+			queue->push(message_vec);
+		}
+		send_complete.store(true);
+	});
+
+	std::atomic<bool> finish(false);
+	auto interval = std::chrono::milliseconds(5000);
+	auto forceDisconnectThread = forceCloseConnections(finish, interval);
+
+	// Wait for them all to be sent
+	start = std::chrono::high_resolution_clock::now();
+	while (!(queue->isEmpty()
+		&& channel_listener->getNumberOfTransmittedMessages() == num_messages
+		&& send_complete.load())
+		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages)*2)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_TRUE(queue->isEmpty());
+	GTEST_ASSERT_TRUE(send_complete.load());
+	GTEST_ASSERT_EQ(channel_listener->getNumberOfTransmittedMessages(), num_messages);
+
+	finish.store(true);
+	forceDisconnectThread.join();
+
+}
+

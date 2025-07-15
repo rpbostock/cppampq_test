@@ -80,7 +80,7 @@ public:
 		return result;
 	}
 
-	Typ peek()
+	Typ& peek()
 	{
 		std::unique_lock<std::mutex> lock(mutex_);
 		while(queue_.empty())
@@ -88,7 +88,7 @@ public:
 			event_.wait_for(lock, std::chrono::milliseconds(TIMEOUT_MS));
 		}
 
-		Typ result = std::move(queue_.front());
+		Typ& result = queue_.front();
 		return result;
 	}
 

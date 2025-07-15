@@ -23,21 +23,25 @@ public:
 private:
 
 	// Force connections to close
-	std::thread forceCloseConnections(std::atomic<bool>& finish, std::chrono::milliseconds& interval);
+	static std::thread forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval);
+	static int forceCloseConnections_();
 
 	// Verification of start stop behaviour on the core connection and handler (excludes channels)
 	static bool testStartStopRealNoChannel_(int num_repeats, int num_threads);
-	bool testForceReconnectNoChannel_(int num_repeats, int num_threads);
+	static bool testForceReconnectNoChannel_(int num_repeats, int num_threads);
 	FRIEND_TEST(TestAmqp, testStartStopRealNoChannel_short);
 	FRIEND_TEST(TestAmqp, testStartStopRealNoChannel_long);
 	FRIEND_TEST(TestAmqp, testReconnectionNoChannel_short);
 	FRIEND_TEST(TestAmqp, testReconnectionNoChannel_long);
 
 	// Verification of purely transmit items
-	FRIEND_TEST(TestAmqp, testTransmitChannel_short_);
-	FRIEND_TEST(TestAmqp, testTransmitChannel_long_);
-	void testTransmitChannel_(const size_t num_messages);
+	FRIEND_TEST(TestAmqp, testTransmitChannel_short);
+	FRIEND_TEST(TestAmqp, testTransmitChannel_long);
+	static void testTransmitChannel_(const size_t num_messages);
+	static std::chrono::seconds getTransmitTimeout_(const size_t num_messages);
 
+	FRIEND_TEST(TestAmqp, testReconnectionTxChannel_short);
+	static void testTransmitChannelWithReconnect_(const size_t num_messages);
 
 	// Example tests looking at specific core functionality and stability
 	static bool testStartStopExampleWithSingleChannel_(int num_repeats, int num_threads);
