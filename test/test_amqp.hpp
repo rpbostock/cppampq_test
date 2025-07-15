@@ -35,6 +35,8 @@ private:
 
 	// Verification of purely transmit items
 	FRIEND_TEST(TestAmqp, testTransmitChannel_short_);
+	FRIEND_TEST(TestAmqp, testTransmitChannel_long_);
+	void testTransmitChannel_(const size_t num_messages);
 
 
 	// Example tests looking at specific core functionality and stability

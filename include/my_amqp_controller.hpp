@@ -55,9 +55,6 @@ class MyAmqpController {
 public:
 	using ChannelHandlerPtr = std::shared_ptr<MyAmqpChannel>;
 	using TxChannelHandlerPtr = std::shared_ptr<MyAmqpTxChannel>;
-	// using RxChannelHandlerPtr = std::shared_ptr<MyAmqpRxChannel>;
-	using TxChannelDataHandlerPtr = std::shared_ptr<MyAmqpTxChannelDataHandler>;
-	// using RxChannelDataHandlerPtr = std::shared_ptr<MyAmqpRxChannelDataHandler>;
 	explicit MyAmqpController(const std::string& address) : address_(address)
 	{
 		evbase = event_base_new();
@@ -88,11 +85,10 @@ public:
 	TxChannelHandlerPtr createTransmitChannel(const ChannelConfig& config)
 	{
 		auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection.get());
-		handlers_.emplace(config.queue_name, std::make_shared<MyAmqpTxChannelDataHandler>());
 		auto tx_channel = std::make_shared<MyAmqpTxChannel>(std::move(amqp_channel)
 			, config
 			, [&config, this](const std::string &error_message) { onChannelError(config.queue_name, error_message.c_str()); }
-			, handlers_[config.queue_name]);
+			, std::make_shared<MyAmqpChannel::MyTxDataQueue>(1000));
 		channels_.emplace(config.queue_name, tx_channel);
 		return tx_channel;
 	}
@@ -188,7 +184,6 @@ private:
 
 	// Channel handling
 	std::unordered_map<std::string, ChannelHandlerPtr> channels_;
-	std::unordered_map<std::string, TxChannelDataHandlerPtr> handlers_;
 
 	// Set this to true when we have finished with processing events and cleaned up
 	std::atomic<bool> is_connection_finished_with {false};

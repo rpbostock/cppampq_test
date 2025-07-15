@@ -1,5 +1,5 @@
 #pragma once
-#include "my_amqp_channel_handler.hpp"
+#include "queue.hpp"
 #include "logging.hpp"
 
 namespace rmq {
@@ -10,6 +10,8 @@ namespace rmq {
 class MyAmqpChannel
 {
 public:
+	using MyTxDataQueue = Queue<std::shared_ptr<std::vector<char>>>;
+	using MyTxDataQueuePtr = std::shared_ptr<Queue<std::shared_ptr<std::vector<char>>>>;
 	MyAmqpChannel(const ChannelConfig& channel_config
 		, std::function<void(const std::string &)> error_callback) :
 		channel_config_(channel_config)
@@ -22,7 +24,6 @@ public:
 protected:
 	/**
 	 * This is called when constructed or after handling an error
-	 * @param tcp_channel
 	 */
 	virtual void setupBaseTcpChannel()
 	{
@@ -88,10 +89,10 @@ public:
 	MyAmqpTxChannel(std::unique_ptr<AMQP::TcpChannel> tcp_channel
 	                , const ChannelConfig &channel_config
 	                , std::function<void(const std::string &)> error_callback
-	                , std::shared_ptr<MyAmqpTxChannelDataHandler> data_handler) :
+	                , MyTxDataQueuePtr queue) :
 	MyAmqpChannel(channel_config
 		, std::move(error_callback))
-		, data_handler_(std::move(data_handler))
+		, queue_(std::move(queue))
 	{
 		initialise_(std::move(tcp_channel));
 	}
@@ -119,7 +120,7 @@ public:
 
 	auto getHandler()
 	{
-		return data_handler_;
+		return queue_;
 	}
 
 	auto getNumberOfTransmittedMessages() const
@@ -179,7 +180,7 @@ private:
 		while (is_channel_active_)
 		{
 			// Check if there's anything to send
-			if (data_handler_->isEmpty())
+			if (queue_->isEmpty())
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				// TODO Add back in heartbeat functionality
@@ -191,11 +192,8 @@ private:
 
 			// Race condition here with the isTransmissionComplete - use mutex to avoid
 			// If the queue is empty, popMessage is blocking!
-			LOG_INFO("Data ready for transmit");
-			const auto message = data_handler_->front();
-
-			LOG_INFO("MyAmqpTxChannel: " << numTransmitted_ << " : Message " << message);
-			++numTransmitted_;
+			// LOG_INFO("Data ready for transmit");
+			const auto message = queue_->peek();
 
 			// Reduce scope of mutex locking
 			{
@@ -204,16 +202,20 @@ private:
 				{
 					LOG_ERROR("(MyAmqpTxChannel) Error: Failed to publish message " << message);
 				}
+				else
+				{
+					LOG_INFO("MyAmqpTxChannel: " << numTransmitted_ << " : Message " << message);
+					queue_->pop(); // Only remove the message from the queue on a successful transmit
+					++numTransmitted_;
+				}
 			}
-			// We've transferred the message - remove from our queue
-			data_handler_->popMessage();
 		}
 		LOG_INFO("MyAmqpTxChannel data transmit for exchange " << channel_config_.exchange_name << " has stopped");
 	}
 
 private:
 	std::atomic<size_t> numTransmitted_ {0};
-	std::shared_ptr<MyAmqpTxChannelDataHandler> data_handler_;
+	MyTxDataQueuePtr queue_;
 	std::jthread transmit_thread_;
 
 };
