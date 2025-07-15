@@ -13,11 +13,11 @@ using MyTxDataQueuePtr = std::shared_ptr<Queue<std::shared_ptr<std::vector<char>
 class ChannelListener
 {
 public:
-	void onNumberOfTransmittedMessages(size_t num_transmitted)
+	void onNumberOfTransmittedMessages(const size_t num_transmitted)
 	{
-		if (num_transmitted%100000)
+		if (num_transmitted%100000 == 0)
 		{
-
+			LOG_INFO("Number of transmitted messages: " << num_transmitted);
 		}
 		num_transmitted_ = num_transmitted;
 	}
