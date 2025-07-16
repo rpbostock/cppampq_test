@@ -2,6 +2,7 @@
 #include "my_amqp_controller_example.hpp"
 #include "my_amqp_controller_no_channel.hpp"
 #include "my_amqp_controller.hpp"
+#include "rx_client_wrapper.hpp"
 
 TEST_F(TestAmqp, testStartStopExampleWithSingleChannel_short)
 {
@@ -477,8 +478,6 @@ void TestAmqp::testMultipleTxRxChannelsAsync_(const size_t num_messages, const s
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
-
-
 }
 
 void TestAmqp::testSingleTxRxChannelsAsync_(rmq::MyAmqpController &controller
@@ -570,3 +569,106 @@ void TestAmqp::testSingleTxRxChannelsAsync_(rmq::MyAmqpController &controller
 	entry->setTestThread(test_thread);
 }
 
+TEST_F(TestAmqp, testSingleTxMultipleRx_short)
+{
+	constexpr size_t num_messages = 10000;
+	constexpr size_t num_rx_channels = 2;
+	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_rx_channels << " receive channels";
+	testSingleTxMultipleRx_(num_messages, num_rx_channels);
+}
+
+void TestAmqp::testSingleTxMultipleRx_(const size_t num_messages, const size_t num_rx_channels)
+{
+	// Basic setup
+	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
+	controller.start();
+
+	// Core configuration
+	rmq::ChannelConfig config {"testSingleTxMultipleRx_exchange_"
+			, ""
+			, "testSingleTxMultipleRx_routing"};
+	config.qos_prefetch_count = 200;
+
+	// Need a single transmitter
+	const auto tx_channel_listener = std::make_shared<rmq::ChannelListener>();
+	const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener);
+
+	std::set<RxClientWrapper> rx_clients;
+	for (int i=0; i<num_rx_channels; i++)
+	{
+		auto rx_config = config;
+		rx_config.queue_name = "testSingleTxMultipleRx_queue_" + std::to_string(i);
+		const auto rx_channel_listener = std::make_shared<rmq::ChannelListener>();
+		const std::string rx_channel_name = controller.createReceiveChannel(rx_config, rx_channel_listener);
+		const auto rx_queue = controller.getRxQueue(rx_channel_name);
+		const auto ack_fn = controller.getAckFunction(rx_channel_name);
+		rx_clients.emplace(RxClientWrapper(rx_channel_name, rx_queue, rx_channel_listener, ack_fn));
+	}
+
+	// Ensure we're up and running
+	auto start = std::chrono::high_resolution_clock::now();
+	while (!(controller.isConnectionReady()
+			 && tx_channel_listener->isActive()
+			 && std::ranges::all_of(rx_clients,[](const auto& entry) { return entry.getListener()->isActive(); })
+			 )
+		   && std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_TRUE(controller.isConnectionReady()) << "Connection is not ready on " << config.exchange_name;
+	GTEST_ASSERT_TRUE(tx_channel_listener->isActive()) << "Channel is not active on " << tx_channel_name;
+	GTEST_ASSERT_TRUE(std::ranges::all_of(rx_clients,[](const auto& entry) { return entry.getListener()->isActive(); })) << "Rx Channels are not all active";
+
+	// Send some messages
+	const auto tx_queue = controller.getTxQueue(tx_channel_name);
+	GTEST_ASSERT_TRUE(tx_queue != nullptr);
+	std::jthread send_thread([&tx_queue, num_messages]()
+	{
+		for (size_t i = 0; i < num_messages; i++)
+		{
+			std::string message = "test message " + std::to_string(i);
+			auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
+			tx_queue->push(message_vec);
+		}
+	});
+
+	// Need num_rx_channels worth of receivers
+	std::atomic<bool> finish{false};
+	std::jthread receive_thread([&rx_clients, &finish]()
+	{
+		while (!finish.load())
+		{
+			bool all_empty = true;
+			for (auto& entry : rx_clients)
+			{
+				if (!entry.getQueue()->isEmpty())
+				{
+					auto message = entry.getQueue()->pop();
+					entry.acknowledge(message.getAck());
+					all_empty = false;
+				}
+			}
+			if (all_empty)
+			{
+				LOG_TRACE("Queue is empty");
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			}
+		}
+	});
+
+
+	// Wait until all receivers have finished or timed out
+	start = std::chrono::high_resolution_clock::now();
+	auto timeout = std::max({getTransmitTimeout_(num_messages), getReceiveTimeout_(num_messages), std::chrono::seconds(50)});
+	LOG_INFO("Waiting for all the messages to have been transmitted and received: " << timeout.count() << " seconds");
+	while (!std::ranges::all_of(rx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfReceivedMessages() == num_messages; })
+	       && std::chrono::high_resolution_clock::now() - start < timeout)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	finish.store(true);
+	send_thread.join();
+	receive_thread.join();
+
+	GTEST_ASSERT_TRUE(std::ranges::all_of(rx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfReceivedMessages() == num_messages;} ));
+}

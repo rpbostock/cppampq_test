@@ -23,7 +23,16 @@ public:
 		{
 			LOG_INFO(channel_name << ": Number of transmitted messages: " << num_transmitted);
 		}
-		num_transmitted_ = num_transmitted;
+		num_transmitted_.store(num_transmitted);
+	}
+
+	void onNumberOfReceivedMessages(const std::string& channel_name, const size_t num_received)
+	{
+		if (num_received%100000 == 0)
+		{
+			LOG_INFO(channel_name << ": Number of received messages: " << num_received);
+		}
+		num_received_.store(num_received);
 	}
 
 	void onChannelStateChange(const std::string& channel_name, const ChannelState state)
@@ -42,6 +51,11 @@ public:
 		return num_transmitted_.load();
 	}
 
+	size_t getNumberOfReceivedMessages() const
+	{
+		return num_received_.load();
+	}
+
 	size_t getRemoteQueueSize() const
 	{
 		return remote_queue_size_.load();
@@ -54,6 +68,7 @@ public:
 private:
 	std::atomic<size_t> remote_queue_size_ {0};
 	std::atomic<size_t> num_transmitted_ {0};
+	std::atomic<size_t> num_received_ {0};
 	std::atomic<ChannelState> state_ {ChannelState::none};
 };
 
@@ -143,11 +158,13 @@ public:
 					, std::function<void(const std::string &)> error_callback
 					, const MyRxDataQueuePtr& queue
 					, const std::shared_ptr<ChannelListener>& listener
+					, const size_t num_received=0
 					) : MyAmqpChannel(channel_config
 						, std::move(error_callback)
 						, "RX - " + channel_config.queue_name)
 	, queue_(queue)
 	, listener_(listener)
+	, num_received_(num_received)
 	{
 		initialise_(std::move(tcp_channel));
 	}
@@ -275,6 +292,7 @@ private:
                             wrapper.setAck(std::move(ack));
 
                             queue_->push(std::move(wrapper));
+                        	listener_->onNumberOfReceivedMessages(channel_name_, ++num_received_);
 
                             // Don't acknowledge at this point - we only do that once we've handled the data itself
                         })
@@ -294,12 +312,8 @@ private:
         }
 	}
 
-
-
-
 	void deactivate_()
 	{
-		// TODO Need to update this
 		setState_(ChannelState::deactivating);
 		tcp_channel_->cancel(channel_config_.queue_name).onSuccess([this]()
 		{
@@ -323,7 +337,7 @@ private:
 		LOG_INFO(channel_name_ << ":MyAmqpTxChannel has been deactivated");
 	}
 
-	std::atomic<size_t> num_transmitted_ {0};
+	std::atomic<size_t> num_received_ {0};
 	MyRxDataQueuePtr queue_;
 	std::shared_ptr<ChannelListener> listener_;
 };

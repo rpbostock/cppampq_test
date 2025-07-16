@@ -15,14 +15,23 @@ public:
 	void SetUp() override
 	{
 		clearQueues();
+		clearExchanges();
 	}
 
 	// Clear-up previous queue data - assume that there is nothing else running on this test machine
 	static void clearQueues()
 	{
-		auto rc = system("rabbitmqadmin -f tsv -q list queues name | while read queue; do rabbitmqadmin -q delete queue name=${queue}; done");
+		const auto rc = system("rabbitmqadmin -f tsv -q list queues name | while read queue; do rabbitmqadmin -q delete queue name=${queue}; done");
 		ASSERT_EQ(rc, EXIT_SUCCESS);
 	}
+
+	static void clearExchanges()
+	{
+		const auto rc = system(	"rabbitmqadmin -f tsv -q list exchanges name | grep test | while read exchange; do rabbitmqadmin -q delete exchange name=${exchange}; done");
+		ASSERT_EQ(rc, EXIT_SUCCESS);
+	}
+
+
 private:
 
 	class TxRxThreadEntry
@@ -88,6 +97,9 @@ private:
 	static void testMultipleTxRxChannelsAsync_(size_t num_messages, size_t num_channels);
 	static void testSingleTxRxChannelsAsync_(rmq::MyAmqpController &controller, const std::shared_ptr<TxRxThreadEntry> &entry, size_t num_messages);
 	static std::chrono::seconds getReceiveTimeout_(const size_t num_messages);
+
+	FRIEND_TEST(TestAmqp, testSingleTxMultipleRx_short);
+	static void testSingleTxMultipleRx_(size_t num_messages, size_t num_rx_channels);
 
 	// Example tests looking at specific core functionality and stability
 	static bool testStartStopExampleWithSingleChannel_(int num_repeats, int num_threads);
