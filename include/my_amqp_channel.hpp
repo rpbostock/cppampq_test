@@ -28,7 +28,7 @@ public:
 
 	void onChannelStateChange(const std::string& channel_name, const ChannelState state)
 	{
-		LOG_INFO(channel_name << "Channel state changed to " << static_cast<int>(state));
+		LOG_INFO(channel_name << ": Channel state changed to " << static_cast<int>(state));
 		state_.store(state);
 	}
 
@@ -446,9 +446,10 @@ private:
 		while (channel_state_.load() == ChannelState::active)
 		{
 			// Check if there's anything to send
-			if (queue_->isEmpty())
+			if (queue_->isEmpty() || current_batch_size_ >= BATCH_SIZE)
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				current_batch_size_ = 0;
 				// TODO Add back in heartbeat functionality
 				continue;
 			}
@@ -481,6 +482,7 @@ private:
 					LOG_TRACE(channel_name_  << ": Transmit - " << num_transmitted_ << " : Message " << message);
 					queue_->pop(); // Only remove the message from the queue on a successful transmit
 					listener_->onNumberOfTransmittedMessages(channel_config_.exchange_name, ++num_transmitted_);
+					++current_batch_size_;
 				}
 			}
 		}
@@ -492,6 +494,8 @@ private:
 	MyTxDataQueuePtr queue_;
 	std::jthread transmit_thread_;
 	std::shared_ptr<ChannelListener> listener_;
+	size_t current_batch_size_ = 0;
+	const static size_t BATCH_SIZE = 100; // used to prevent the transmit side hogging all the processing time
 };
 
 } // rmq

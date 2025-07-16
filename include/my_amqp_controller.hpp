@@ -28,7 +28,7 @@ public:
 		is_ready_ = true;
 	}
 
-	void onError(TcpConnection *connection, const char *message) override
+	void onError(AMQP::TcpConnection *connection, const char *message) override
 	{
 		std::cout << "onError - connection error: " << message << std::endl;
 		is_error_ = true;
@@ -169,6 +169,7 @@ public:
 
 	std::string createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		if (!listener)
 		{
 			throw std::runtime_error("Cannot accept nullptr listener");
@@ -189,6 +190,7 @@ public:
 
 	std::string createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		if (!listener)
 		{
 			throw std::runtime_error("Cannot accept nullptr listener");
@@ -211,11 +213,13 @@ public:
 	
 	bool isConnectionReady() const
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		return handler_->isReady();
 	}
 
 	bool isChannelReady(const std::string& channel_name)
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		const auto it = tx_channel_wrappers_.find(channel_name);
 		if (it == tx_channel_wrappers_.end())
 		{
@@ -226,12 +230,18 @@ public:
 
 	bool isConnectionError() const
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		return handler_->isError();
 	}
 
 	void start()
 	{
-		maintain_connection_thread = std::thread(&MyAmqpController::run, this);
+		std::lock_guard<std::mutex> lock(mutex_);
+		// Check we aren't already running!
+		if (!maintain_connection_thread.joinable())
+		{
+			maintain_connection_thread = std::thread(&MyAmqpController::run, this);
+		}
 	}
 
 
@@ -288,12 +298,14 @@ public:
 
 	int getNumReconnections() const
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		return num_reconnections.load();
 	}
 
 	// TODO Handle channel errors
 	void onChannelError(const std::string& channel_name, const char *message) const
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		// Force a reconnection and restart of all the channels - from experience just restarting the affected channel doesn't work
 		LOG_ERROR(message);
 		connection_->close();
@@ -301,6 +313,7 @@ public:
 
 	MyTxDataQueuePtr getTxQueue(const std::string& channel_name)
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		const auto it = tx_channel_wrappers_.find(channel_name);
 		if (it == tx_channel_wrappers_.end())
 		{
@@ -311,6 +324,7 @@ public:
 
 	MyRxDataQueuePtr getRxQueue(const std::string& channel_name)
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		const auto it = rx_channel_wrappers_.find(channel_name);
 		if (it == rx_channel_wrappers_.end())
 		{
@@ -319,8 +333,24 @@ public:
 		return it->second.queue();
 	}
 
+	std::function<void(const IMessageAck& ack)> getAckFunction(const std::string& channel_name)
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		const auto it = rx_channel_wrappers_.find(channel_name);
+		if (it == rx_channel_wrappers_.end())
+		{
+			return nullptr;
+		}
+		const auto &info = it->second;
+		return ([&info](const IMessageAck& ack)
+		{
+			info.acknowledge(ack);
+		});
+	}
+
 	void acknowledge(const std::string& channel_name, const IMessageAck& ack)
 	{
+		std::lock_guard<std::mutex> lock(mutex_);
 		const auto it = rx_channel_wrappers_.find(channel_name);
 		if (it == rx_channel_wrappers_.end())
 		{
@@ -347,6 +377,7 @@ private:
 
 	// Set this to true when we have finished with processing events and cleaned up
 	std::atomic<bool> is_connection_finished_with {false};
+	mutable std::mutex mutex_;
 };
 
 }

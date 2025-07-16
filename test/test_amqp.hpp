@@ -3,6 +3,9 @@
 #include <gtest/gtest.h>
 #include <thread>
 
+#include "channel_config.hpp"
+#include "my_amqp_controller.hpp"
+
 class TestAmqp : public ::testing::Test
 {
 public:
@@ -21,6 +24,37 @@ public:
 		ASSERT_EQ(rc, EXIT_SUCCESS);
 	}
 private:
+
+	class TxRxThreadEntry
+	{
+	public:
+		explicit TxRxThreadEntry(const rmq::ChannelConfig& config) : config_(config), test_thread_(nullptr), finish_(false) {}
+		virtual ~TxRxThreadEntry() = default;
+
+		rmq::ChannelConfig getChannelConfig()
+		{
+			return config_;
+		}
+
+		void setTestThread(const std::shared_ptr<std::jthread>& test_thread)
+		{
+			test_thread_ = test_thread;
+		}
+
+		std::shared_ptr<std::jthread> getTestThread()
+		{
+			return test_thread_;
+		}
+
+		std::atomic<bool> &getFinish()
+		{
+			return finish_;
+		}
+	private:
+		rmq::ChannelConfig config_;
+		std::shared_ptr<std::jthread> test_thread_;
+		std::atomic<bool> finish_;
+	};
 
 	// Force connections to close
 	static std::thread forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval);
@@ -47,7 +81,12 @@ private:
 	// Verification of receive items
 	FRIEND_TEST(TestAmqp, testReceiveChannel_short);
 	FRIEND_TEST(TestAmqp, testReceiveChannel_long);
-	static void testReceiveChannel_(const size_t num_messages);
+	static void testReceiveChannelAsync_(const size_t num_messages);
+
+	FRIEND_TEST(TestAmqp, testTxRxMultipleSeparateChannels_short);
+	FRIEND_TEST(TestAmqp, testTxRxMultipleSeparateChannels_long);
+	static void testMultipleTxRxChannelsAsync_(size_t num_messages, size_t num_channels);
+	static void testSingleTxRxChannelsAsync_(rmq::MyAmqpController &controller, const std::shared_ptr<TxRxThreadEntry> &entry, size_t num_messages);
 	static std::chrono::seconds getReceiveTimeout_(const size_t num_messages);
 
 	// Example tests looking at specific core functionality and stability
