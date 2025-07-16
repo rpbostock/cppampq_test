@@ -40,12 +40,15 @@ private:
 	static void testTransmitChannel_(const size_t num_messages);
 	static std::chrono::seconds getTransmitTimeout_(const size_t num_messages);
 
+
 	FRIEND_TEST(TestAmqp, testReconnectionTxChannel_short);
 	static void testTransmitChannelWithReconnect_(const size_t num_messages);
 
 	// Verification of receive items
 	FRIEND_TEST(TestAmqp, testReceiveChannel_short);
+	FRIEND_TEST(TestAmqp, testReceiveChannel_long);
 	static void testReceiveChannel_(const size_t num_messages);
+	static std::chrono::seconds getReceiveTimeout_(const size_t num_messages);
 
 	// Example tests looking at specific core functionality and stability
 	static bool testStartStopExampleWithSingleChannel_(int num_repeats, int num_threads);
