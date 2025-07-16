@@ -53,13 +53,15 @@ private:
 
 
 using ChannelListenerPtr = std::shared_ptr<ChannelListener>;
-using ChannelHandlerPtr = std::unique_ptr<MyAmqpChannel>;
-class MyAmqpTxChannelInfo
+using ChannelHandlerTxPtr = std::unique_ptr<MyAmqpTxChannel>;
+using ChannelHandlerRxPtr = std::unique_ptr<MyAmqpRxChannel>;
+template <typename MessageType, typename ChannelTypePtr>
+class MyAmqpChannelInfo
 {
 public:
-	explicit MyAmqpTxChannelInfo(ChannelHandlerPtr channel
+	explicit MyAmqpChannelInfo(ChannelTypePtr channel
 		, const ChannelListenerPtr &listener
-		, const MyTxDataQueuePtr& queue
+		, const std::shared_ptr<MessageType>& queue
 		, const ChannelConfig& config)
 		: channel_(std::move(channel))
 		, queue_(queue)
@@ -72,13 +74,13 @@ public:
 		channel_.reset();
 	}
 
-	void setChannel(ChannelHandlerPtr channel)
+	void setChannel(ChannelTypePtr channel)
 	{
 		channel_.reset();
 		channel_ = std::move(channel);
 	}
 
-	[[nodiscard]] MyTxDataQueuePtr queue() const
+	[[nodiscard]] std::shared_ptr<MessageType> queue() const
 	{
 		return queue_;
 	}
@@ -98,11 +100,41 @@ public:
 		listener_ = listener;
 	}
 
-private:
-	ChannelHandlerPtr channel_;
-	MyTxDataQueuePtr queue_;
+protected:
+	ChannelTypePtr channel_;
+	std::shared_ptr<MessageType> queue_;
 	ChannelConfig config_;
 	std::shared_ptr<ChannelListener> listener_;
+};
+
+
+class MyAmqpTxChannelInfo : public MyAmqpChannelInfo<MyTxDataQueue, ChannelHandlerTxPtr>
+{
+public:
+	explicit MyAmqpTxChannelInfo(ChannelHandlerTxPtr channel
+	                             , const ChannelListenerPtr &listener
+	                             , const std::shared_ptr<MyTxDataQueue> &queue
+	                             , const ChannelConfig &config) :
+		MyAmqpChannelInfo(std::move(channel), listener, queue, config)
+	{
+	}
+};
+
+class MyAmqpRxChannelInfo : public MyAmqpChannelInfo<MyRxDataQueue, ChannelHandlerRxPtr>
+{
+public:
+	explicit MyAmqpRxChannelInfo(ChannelHandlerRxPtr channel
+	                             , const ChannelListenerPtr &listener
+	                             , const std::shared_ptr<MyRxDataQueue> &queue
+	                             , const ChannelConfig &config) :
+		MyAmqpChannelInfo(std::move(channel), listener, queue, config)
+	{
+	}
+
+	void acknowledge(const IMessageAck& ack) const
+	{
+		channel_->acknowledge(ack);
+	}
 };
 
 class MyAmqpController {
@@ -135,16 +167,14 @@ public:
 		// std::cout << "MyAmqpController::~MyAmqpController() - done" << std::endl;
 	}
 
-	void createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
+	std::string createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
 	{
 		if (!listener)
 		{
 			throw std::runtime_error("Cannot accept nullptr listener");
 		}
-		if (config.exchange_name.empty())
-		{
-			throw std::runtime_error("Cannot create channel with empty exchange name");
-		}
+
+		auto channel_name = config.exchange_name;
 		auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection_.get());
 		auto queue = std::make_shared<MyTxDataQueue>(1000, QueueOverflowPolicy::WAIT); // possibly pass this in as a parameter?
 		auto tx_channel = std::make_unique<MyAmqpTxChannel>(std::move(amqp_channel)
@@ -153,7 +183,30 @@ public:
 			, queue
 			, listener);
 
-		channel_wrappers_.emplace(config.exchange_name, MyAmqpTxChannelInfo(std::move(tx_channel), listener, queue, config));
+		tx_channel_wrappers_.emplace(channel_name, MyAmqpTxChannelInfo(std::move(tx_channel), listener, queue, config));
+		return channel_name;
+	}
+
+	std::string createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
+	{
+		if (!listener)
+		{
+			throw std::runtime_error("Cannot accept nullptr listener");
+		}
+
+		auto channel_name = config.queue_name;
+		auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection_.get());
+		auto queue = std::make_shared<MyRxDataQueue>(1000, QueueOverflowPolicy::WAIT); // possibly pass this in as a parameter?
+		auto rx_channel = std::make_unique<MyAmqpRxChannel>(std::move(amqp_channel)
+			, config
+			, [channel_name, this](const std::string &error_message) { onChannelError(channel_name, error_message.c_str()); }
+			, queue
+			, listener);
+
+		rx_channel_wrappers_.emplace(channel_name, MyAmqpRxChannelInfo(std::move(rx_channel), listener, queue, config));
+
+		// Need a way to access bits in the future
+		return channel_name;
 	}
 	
 	bool isConnectionReady() const
@@ -163,8 +216,8 @@ public:
 
 	bool isChannelReady(const std::string& channel_name)
 	{
-		const auto it = channel_wrappers_.find(channel_name);
-		if (it == channel_wrappers_.end())
+		const auto it = tx_channel_wrappers_.find(channel_name);
+		if (it == tx_channel_wrappers_.end())
 		{
 			return false;
 		}
@@ -190,18 +243,23 @@ public:
 
 			if (maintain_connection.load())
 			{
-				// Stop the channels
-				for (auto& channel_wrapper : channel_wrappers_)
+				// Stop the channels - get rid of the old channel info that is now no longer working and will be connected to an obsolete connection
+				for (auto& tx_channel_wrapper : tx_channel_wrappers_)
 				{
-					// Get rid of the old channel info that is now no longer working and will be connected to an obsolete connection
-					channel_wrapper.second.resetChannel();
+					tx_channel_wrapper.second.resetChannel();
+				}
+				for (auto& rx_channel_wrapper : rx_channel_wrappers_)
+				{
+					rx_channel_wrapper.second.resetChannel();
 				}
 
 				// Set up a new connection
 				std::cout << "Reconnecting to " << address_ << std::endl;
 				handler_ = std::make_unique<MyLibEventHandler>(evbase_);
 				connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
-				for (auto& channel_wrapper : channel_wrappers_)
+
+				// Reset the transmitters
+				for (auto& channel_wrapper : tx_channel_wrappers_)
 				{
 					// Create a new channel and connect it to the new connection
 					auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection_.get());
@@ -215,6 +273,8 @@ public:
 						);
 					channel_wrapper.second.setChannel(std::move(tx_channel));
 				}
+
+				// Reset the receivers TODO
 
 				++num_reconnections;
 				std::cout << "Finished reconnecting to " << address_ << std::endl;
@@ -235,17 +295,38 @@ public:
 	void onChannelError(const std::string& channel_name, const char *message) const
 	{
 		// Force a reconnection and restart of all the channels - from experience just restarting the affected channel doesn't work
+		LOG_ERROR(message);
 		connection_->close();
 	}
 
-	MyTxDataQueuePtr getQueue(const std::string& channel_name)
+	MyTxDataQueuePtr getTxQueue(const std::string& channel_name)
 	{
-		const auto it = channel_wrappers_.find(channel_name);
-		if (it == channel_wrappers_.end())
+		const auto it = tx_channel_wrappers_.find(channel_name);
+		if (it == tx_channel_wrappers_.end())
 		{
 			return nullptr;
 		}
 		return it->second.queue();
+	}
+
+	MyRxDataQueuePtr getRxQueue(const std::string& channel_name)
+	{
+		const auto it = rx_channel_wrappers_.find(channel_name);
+		if (it == rx_channel_wrappers_.end())
+		{
+			return nullptr;
+		}
+		return it->second.queue();
+	}
+
+	void acknowledge(const std::string& channel_name, const IMessageAck& ack)
+	{
+		const auto it = rx_channel_wrappers_.find(channel_name);
+		if (it == rx_channel_wrappers_.end())
+		{
+			return;
+		}
+		it->second.acknowledge(ack);
 	}
 
 private:
@@ -261,7 +342,8 @@ private:
 	std::atomic<int> num_reconnections {0};
 
 	// Channel handling
-	std::unordered_map<std::string, MyAmqpTxChannelInfo> channel_wrappers_;
+	std::unordered_map<std::string, MyAmqpTxChannelInfo> tx_channel_wrappers_;
+	std::unordered_map<std::string, MyAmqpRxChannelInfo> rx_channel_wrappers_;
 
 	// Set this to true when we have finished with processing events and cleaned up
 	std::atomic<bool> is_connection_finished_with {false};

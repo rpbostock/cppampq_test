@@ -43,6 +43,10 @@ private:
 	FRIEND_TEST(TestAmqp, testReconnectionTxChannel_short);
 	static void testTransmitChannelWithReconnect_(const size_t num_messages);
 
+	// Verification of receive items
+	FRIEND_TEST(TestAmqp, testReceiveChannel_short);
+	static void testReceiveChannel_(const size_t num_messages);
+
 	// Example tests looking at specific core functionality and stability
 	static bool testStartStopExampleWithSingleChannel_(int num_repeats, int num_threads);
 	static bool testStartStopExampleWithNoChannel_(int num_repeats, int num_threads);

@@ -225,7 +225,7 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages)
 	GTEST_ASSERT_TRUE(channel_listener->isActive());
 
 	// Send some messages
-	const auto queue = controller.getQueue(config.exchange_name);
+	const auto queue = controller.getTxQueue(config.exchange_name);
 	GTEST_ASSERT_TRUE(queue != nullptr);
 
 	std::atomic<bool> send_complete(false);
@@ -271,7 +271,7 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 {
 	// Basic setup
 	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
-	rmq::ChannelConfig config {"testTransmitChannel_short_exchange, testTransmitChannel_short_queue, testTransmitChannel_short_routing"};
+	rmq::ChannelConfig config {"testTransmitChannel_short_exchange", "testTransmitChannel_short_queue", "testTransmitChannel_short_routing"};
 	auto channel_listener = std::make_shared<rmq::ChannelListener>();
 	controller.createTransmitChannel(config, channel_listener);
 	controller.start();
@@ -291,7 +291,7 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 	// std::this_thread::sleep_for(std::chrono::seconds(1));
 
 	// Send some messages
-	const auto queue = controller.getQueue(config.exchange_name);
+	const auto queue = controller.getTxQueue(config.exchange_name);
 	std::atomic send_complete(false);
 	std::jthread send_thread([&queue, &send_complete, num_messages]()
 	{
@@ -326,3 +326,81 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 
 }
 
+TEST_F(TestAmqp, testReceiveChannel_short)
+{
+	GTEST_LOG_(INFO) << "Test that we can receive 100 messages successfully on a queue";
+	testReceiveChannel_(100);
+}
+
+void TestAmqp::testReceiveChannel_(const size_t num_messages)
+{
+	// Basic setup
+	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
+	rmq::ChannelConfig config {"testTransmitChannel_short_exchange", "testTransmitChannel_short_queue", "testTransmitChannel_short_routing"};
+	config.qos_prefetch_count = 100;
+	const auto rx_channel_listener = std::make_shared<rmq::ChannelListener>();
+	const auto tx_channel_listener = std::make_shared<rmq::ChannelListener>();
+	const std::string rx_channel_name = controller.createReceiveChannel(config, rx_channel_listener);
+	const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener);
+	controller.start();
+
+	// Ensure we're up and running
+	auto start = std::chrono::high_resolution_clock::now();
+	while (!(controller.isConnectionReady()
+		&& tx_channel_listener->isActive()
+		&& rx_channel_listener->isActive())
+		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_TRUE(controller.isConnectionReady());
+	GTEST_ASSERT_TRUE(tx_channel_listener->isActive());
+	GTEST_ASSERT_TRUE(rx_channel_listener->isActive());
+
+	// Send some messages
+	const auto tx_queue = controller.getTxQueue(tx_channel_name);
+	GTEST_ASSERT_TRUE(tx_queue != nullptr);
+	for (size_t i=0; i<num_messages; i++)
+	{
+		std::string message = "test message " + std::to_string(i);
+		auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
+		tx_queue->push(message_vec);
+	}
+
+	// Receive the messages
+	const auto rx_queue = controller.getRxQueue(rx_channel_name);
+	GTEST_ASSERT_TRUE(rx_queue != nullptr);
+	std::atomic<size_t> received_messages {0};
+	std::atomic<bool> finish{false};
+	std::jthread receive_thread([&rx_channel_name, &controller, &finish, &rx_queue, &received_messages]()
+	{
+		while (!finish.load())
+		{
+			if (!rx_queue->isEmpty())
+			{
+				auto message = rx_queue->pop();
+				++received_messages;
+				controller.acknowledge(rx_channel_name, message.getAck()); // TODO Need to use a second queue for acks?
+				LOG_INFO("Received message " << received_messages);
+			}
+			else
+			{
+				LOG_INFO("Queue is empty");
+				std::this_thread::sleep_for(std::chrono::milliseconds(100));
+			}
+		}
+	});
+
+	start = std::chrono::high_resolution_clock::now();
+	while (received_messages != num_messages
+		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(300) //getTransmitTimeout_(num_messages))
+		)
+	{
+
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	finish.store(true);
+	receive_thread.join();
+	GTEST_ASSERT_EQ(received_messages, num_messages);
+
+}
