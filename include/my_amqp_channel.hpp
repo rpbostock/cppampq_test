@@ -454,12 +454,9 @@ private:
 				continue;
 			}
 
-			// Check whether we're waiting for a batch of messages to be sent
-			// - transmit_ready_ - flag that we are ready to transmit again
+			LOG_TRACE("Data ready for transmit");
 
-			// Race condition here with the isTransmissionComplete - use mutex to avoid
-			// If the queue is empty, popMessage is blocking!
-			// LOG_INFO("Data ready for transmit");
+			// Get a copy of a message on the queue in case there's any issue sending it
 			const auto message = queue_->peek();
 			if (!message)
 			{
@@ -480,7 +477,7 @@ private:
 				else
 				{
 					LOG_TRACE(channel_name_  << ": Transmit - " << num_transmitted_ << " : Message " << message);
-					queue_->pop(); // Only remove the message from the queue on a successful transmit
+					queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
 					listener_->onNumberOfTransmittedMessages(channel_config_.exchange_name, ++num_transmitted_);
 					++current_batch_size_;
 				}
@@ -490,11 +487,24 @@ private:
 	}
 
 private:
+	// Total number transmitted - this is used to check whether a message has been sent that was queued. The listener
+	// Can be overwritten such that the onNumberOfTransmittedMessages() allows confirmation that a message has been
+	// handled
 	std::atomic<size_t> num_transmitted_ {0};
+
+	// Queue to pass data in for transmission
 	MyTxDataQueuePtr queue_;
+
+	// Separate thread dedicated to sending data - potentially we could have a single shared thread across all TX channels to reduce total number of threads used
 	std::jthread transmit_thread_;
+
+	// Receives all the event updates from this channel as the TCPChannel is not thread safe
 	std::shared_ptr<ChannelListener> listener_;
+
+	// Current number of messages transmitted in a loop on the thread (too many messages at once can hog the CPU and starve other threads)
 	size_t current_batch_size_ = 0;
+
+	// TODO Consider making this configurable so that apps can be tuned
 	const static size_t BATCH_SIZE = 100; // used to prevent the transmit side hogging all the processing time
 };
 
