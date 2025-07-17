@@ -8,6 +8,7 @@
 #include "channel_config.hpp"
 
 #include "my_amqp_channel.hpp"
+#include "rx_client_wrapper.hpp"
 #include "tx_client_wrapper.hpp"
 
 namespace rmq
@@ -190,7 +191,7 @@ public:
 		return TxClientWrapper(channel_name, listener, queue);
 	}
 
-	std::string createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
+	RxClientWrapper createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		if (!listener)
@@ -206,11 +207,11 @@ public:
 			, [channel_name, this](const std::string &error_message) { onChannelError(channel_name, error_message.c_str()); }
 			, queue
 			, listener);
-
+		auto ack_fn = std::bind(&MyAmqpRxChannel::acknowledge, rx_channel.get(), std::placeholders::_1);
 		rx_channel_wrappers_.emplace(channel_name, MyAmqpRxChannelInfo(std::move(rx_channel), listener, queue, config));
 
 		// Need a way to access bits in the future
-		return channel_name;
+		return RxClientWrapper(channel_name, listener, queue, ack_fn);
 	}
 	
 	bool isConnectionReady() const

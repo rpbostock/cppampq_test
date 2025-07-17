@@ -6,10 +6,10 @@ class RxClientWrapper
 {
 public:
 	explicit RxClientWrapper(const std::string &channel_name
-		, const rmq::MyRxDataQueuePtr& queue
 		, const std::shared_ptr<rmq::ChannelListener> &listener
+		, const rmq::MyRxDataQueuePtr& queue
 		, const std::function<void(const rmq::IMessageAck& ack)> &ack_fn) :
-	channel_name_(channel_name), queue_(queue), listener_(listener), acknowledge_fn_(ack_fn)
+	channel_name_(channel_name), listener_(listener), queue_(queue), acknowledge_fn_(ack_fn)
 	{}
 
 	std::string getChannelName() const { return channel_name_; }
