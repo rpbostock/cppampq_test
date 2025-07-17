@@ -251,7 +251,7 @@ public:
 	void run()
 	{
 		// Start a transmit thread for all transmitter channels
-		transmit_active.store(true);
+		cmd_transmit_active.store(true);
 		transmitter_thread = std::jthread([this]() { handleTransmitThreads(); });
 
 		while (maintain_connection.load())
@@ -262,8 +262,12 @@ public:
 			if (maintain_connection.load())
 			{
 				// Stop the transmit thread here - important
-				transmit_active.store(false);
-				transmitter_thread.join();
+				cmd_transmit_active.store(false);
+				while (res_transmit_active.load())
+				{
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
+				}
+
 				transmit_functions_.clear();
 
 				// Stop the channels - get rid of the old channel info that is now no longer working and will be connected to an obsolete connection
@@ -297,6 +301,7 @@ public:
 					transmit_functions_.emplace_back(std::bind(&MyAmqpTxChannel::sendData, tx_channel.get(), std::placeholders::_1));
 					channel_wrapper.second.setChannel(std::move(tx_channel));
 				}
+				cmd_transmit_active.store(true);
 
 				// Reset the receivers TODO
 
@@ -305,8 +310,10 @@ public:
 			}
 		}
 
-		transmit_active.store(false);
+		cmd_transmit_active.store(false); // stop trying to transmit
+		transmit_exit.store(true); // and leave the thread
 		transmitter_thread.join();
+
 		event_base_free(evbase_);
 
 		// We need to let the deconstructor know that we are done with all the event bits
@@ -365,6 +372,8 @@ public:
 		});
 	}
 
+	// Deprecated
+#if 0
 	void acknowledge(const std::string& channel_name, const IMessageAck& ack)
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -375,6 +384,7 @@ public:
 		}
 		it->second.acknowledge(ack);
 	}
+#endif
 
 	void setMaxTransmitBatchSize(const size_t size)
 	{
@@ -389,21 +399,29 @@ private:
 		// Current number of messages transmitted in a loop on the thread (too many messages at once can hog the CPU and starve other threads)
 		size_t current_batch_size_ = 0;
 
-		while (transmit_active.load())
+		while (!transmit_exit.load())
 		{
-			const auto old_batch_size = current_batch_size_;
-			for (auto& fn : transmit_functions_)
+			if (cmd_transmit_active.load())
 			{
-				if (transmit_active.load())
+				const auto old_batch_size = current_batch_size_;
+				for (auto& fn : transmit_functions_)
 				{
-					fn(current_batch_size_);
+					if (cmd_transmit_active.load())
+					{
+						fn(current_batch_size_);
+					}
+				}
+				if (old_batch_size == current_batch_size_ || current_batch_size_ > max_tx_batch_size_)
+				{
+					current_batch_size_ = 0;
+					std::this_thread::sleep_for(std::chrono::milliseconds(10));
 				}
 			}
-			if (old_batch_size == current_batch_size_ || current_batch_size_ > max_tx_batch_size_)
+			else
 			{
-				current_batch_size_ = 0;
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			}
+
 		}
 	}
 
@@ -425,7 +443,9 @@ private:
 
 	// Transmitting on multiple channels
 	std::jthread transmitter_thread;
-	std::atomic<bool> transmit_active {false};
+	std::atomic<bool> cmd_transmit_active {false};
+	std::atomic<bool> res_transmit_active {false};
+	std::atomic<bool> transmit_exit {true};
 
 	// used to prevent the transmit side hogging all the processing time
 	size_t max_tx_batch_size_ = 500;

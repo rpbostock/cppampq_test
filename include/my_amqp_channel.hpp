@@ -35,6 +35,15 @@ public:
 		num_received_.store(num_received);
 	}
 
+	void onNumberOfAcknowledgedMessages(const std::string& channel_name, const size_t num_acknowledged)
+	{
+		if (num_acknowledged%100000 == 0)
+		{
+			LOG_INFO(channel_name << ": Number of acknowledged messages: " << num_acknowledged);
+		}
+		num_acknowledged_.store(num_acknowledged);
+	}
+
 	void onChannelStateChange(const std::string& channel_name, const ChannelState state)
 	{
 		LOG_INFO(channel_name << ": Channel state changed to " << static_cast<int>(state));
@@ -56,6 +65,11 @@ public:
 		return num_received_.load();
 	}
 
+	size_t getNumberOfAcknowledgedMessages() const
+	{
+		return num_acknowledged_.load();
+	}
+
 	size_t getRemoteQueueSize() const
 	{
 		return remote_queue_size_.load();
@@ -69,6 +83,7 @@ private:
 	std::atomic<size_t> remote_queue_size_ {0};
 	std::atomic<size_t> num_transmitted_ {0};
 	std::atomic<size_t> num_received_ {0};
+	std::atomic<size_t> num_acknowledged_ {0};
 	std::atomic<ChannelState> state_ {ChannelState::none};
 };
 
@@ -159,12 +174,14 @@ public:
 					, const MyRxDataQueuePtr& queue
 					, const std::shared_ptr<ChannelListener>& listener
 					, const size_t num_received=0
+					, const size_t num_acknowledged_=0
 					) : MyAmqpChannel(channel_config
-						, std::move(error_callback)
-						, "RX - " + channel_config.queue_name)
+					                  , std::move(error_callback)
+					                  , "RX - " + channel_config.queue_name)
+	, num_received_(num_received)
+	, num_acknowledged_(num_acknowledged_)
 	, queue_(queue)
 	, listener_(listener)
-	, num_received_(num_received)
 	{
 		initialise_(std::move(tcp_channel));
 	}
@@ -181,7 +198,9 @@ public:
 
 	void acknowledge(const IMessageAck& ack)
 	{
+		LOG_DEBUG(channel_name_ << "Sending acknowledgement for delivery tag " << ack.getDeliveryTag());
 		tcp_channel_->ack(ack.getDeliveryTag());
+		listener_->onNumberOfAcknowledgedMessages(channel_name_, ++num_acknowledged_);
 	}
 
 private:
@@ -337,6 +356,7 @@ private:
 		LOG_INFO(channel_name_ << ": has been deactivated");
 	}
 	std::atomic<size_t> num_received_ {0};
+	std::atomic<size_t> num_acknowledged_ {0};
 	MyRxDataQueuePtr queue_;
 	std::shared_ptr<ChannelListener> listener_;
 };
