@@ -334,14 +334,18 @@ private:
 		{
 			setState_(ChannelState::inactive);
 		}
-		LOG_INFO(channel_name_ << ":MyAmqpTxChannel has been deactivated");
+		LOG_INFO(channel_name_ << ": has been deactivated");
 	}
-
 	std::atomic<size_t> num_received_ {0};
 	MyRxDataQueuePtr queue_;
 	std::shared_ptr<ChannelListener> listener_;
 };
 
+/**
+ * WARNING: The MyAmqpTxChannel currently has a thread per transmit which is inefficient if scaled to multiple channels. Needs to be
+ * reimplemented so that all TX channels share a transmit thread. Previously this was done on the event thread, which coneptually wasn't a bad
+ * approach, but did mean that the event queue could get hogged by waiting to transmit
+ */
 class MyAmqpTxChannel : public MyAmqpChannel
 {
 public:
@@ -370,6 +374,48 @@ public:
 		deactivate_();
 	}
 
+	void sendData(size_t &current_batch_size)
+	{
+		if (channel_state_.load() != ChannelState::active)
+		{
+			return;
+		}
+
+		// Check if there's anything to send
+		if (queue_->isEmpty() )
+		{
+			return;
+		}
+
+		LOG_TRACE(channel_name_ << ": Data ready for transmit");
+
+		// Get a copy of a message on the queue in case there's any issue sending it
+		const auto message = queue_->peek();
+		if (!message)
+		{
+			LOG_ERROR(channel_name_ << ": Failed to get message from queue");
+			return;
+		}
+
+		// Reduce scope of mutex locking
+		{
+			std::lock_guard lock(tcp_channel_mutex_);
+			if (!tcp_channel_->publish(channel_config_.exchange_name, channel_config_.routing_key, message->data(), message->size()))
+			{
+				std::ostringstream os;
+				os << "Failed to publish message " << message;
+				setState_(ChannelState::error);
+				on_error_callback_(os.str());
+			}
+			else
+			{
+				LOG_TRACE(channel_name_  << ": Transmit - " << num_transmitted_ << " : Message " << message);
+				queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
+				listener_->onNumberOfTransmittedMessages(channel_config_.exchange_name, ++num_transmitted_);
+				++current_batch_size;
+			}
+		}
+	}
 
 private:
 	void setState_(ChannelState state)
@@ -414,12 +460,6 @@ private:
 			setState_(ChannelState::error);
 			on_error_callback_(channel_name_ + ": Failed to confirm select: " + std::string(message));
 		});
-
-		// Handle sending new data whenever it is available
-		transmit_thread_ = std::jthread([this]()
-		{
-			this->sendData_();
-		});
 	}
 
 	void deactivate_()
@@ -435,70 +475,7 @@ private:
 		LOG_INFO(channel_name_ << ": has been deactivated");
 	}
 
-	void sendData_()
-	{
-		LOG_INFO(channel_name_ << ": starting data transmit");
 
-		// Wait for the channel to be ready for transmission
-		{
-			std::unique_lock lock(channel_active_mutex_);
-			channel_active_cv_.wait(lock, [this]()
-			{
-				return channel_state_.load() != ChannelState::initialising;
-			});
-		}
-
-		if (channel_state_.load() != ChannelState::active)
-		{
-			LOG_DEBUG(channel_name_ << ": data transmit never started to process data");
-			return;
-		}
-
-		LOG_INFO(channel_name_ << ": data transmit is ready to send data");
-
-		// Wait to be notified to transmit data
-		while (channel_state_.load() == ChannelState::active)
-		{
-			// Check if there's anything to send
-			if (queue_->isEmpty() || current_batch_size_ >= BATCH_SIZE)
-			{
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
-				current_batch_size_ = 0;
-				// TODO Add back in heartbeat functionality
-				continue;
-			}
-
-			LOG_TRACE("Data ready for transmit");
-
-			// Get a copy of a message on the queue in case there's any issue sending it
-			const auto message = queue_->peek();
-			if (!message)
-			{
-				LOG_ERROR(channel_name_ << ": Failed to get message from queue");
-				continue;
-			}
-
-			// Reduce scope of mutex locking
-			{
-				std::lock_guard lock(tcp_channel_mutex_);
-				if (!tcp_channel_->publish(channel_config_.exchange_name, channel_config_.routing_key, message->data(), message->size()))
-				{
-					std::ostringstream os;
-					os << "Failed to publish message " << message;
-					setState_(ChannelState::error);
-					on_error_callback_(os.str());
-				}
-				else
-				{
-					LOG_TRACE(channel_name_  << ": Transmit - " << num_transmitted_ << " : Message " << message);
-					queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
-					listener_->onNumberOfTransmittedMessages(channel_config_.exchange_name, ++num_transmitted_);
-					++current_batch_size_;
-				}
-			}
-		}
-		LOG_INFO(channel_name_ << ": Data transmit has stopped");
-	}
 
 private:
 	// Total number transmitted - this is used to check whether a message has been sent that was queued. The listener
@@ -514,12 +491,6 @@ private:
 
 	// Receives all the event updates from this channel as the TCPChannel is not thread safe
 	std::shared_ptr<ChannelListener> listener_;
-
-	// Current number of messages transmitted in a loop on the thread (too many messages at once can hog the CPU and starve other threads)
-	size_t current_batch_size_ = 0;
-
-	// TODO Consider making this configurable so that apps can be tuned
-	const static size_t BATCH_SIZE = 100; // used to prevent the transmit side hogging all the processing time
 };
 
 } // rmq

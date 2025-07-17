@@ -8,6 +8,7 @@
 #include "channel_config.hpp"
 
 #include "my_amqp_channel.hpp"
+#include "tx_client_wrapper.hpp"
 
 namespace rmq
 {
@@ -183,9 +184,10 @@ public:
 			, [&config, this](const std::string &error_message) { onChannelError(config.queue_name, error_message.c_str()); }
 			, queue
 			, listener);
-
+		transmit_functions_.emplace_back(std::bind(&MyAmqpTxChannel::sendData, tx_channel.get(), std::placeholders::_1));
 		tx_channel_wrappers_.emplace(channel_name, MyAmqpTxChannelInfo(std::move(tx_channel), listener, queue, config));
 		return channel_name;
+		// return TxClientWrapper(channel_name, listener, queue);
 	}
 
 	std::string createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
@@ -247,12 +249,22 @@ public:
 
 	void run()
 	{
+		// Start a transmit thread for all transmitter channels
+		transmit_active.store(true);
+		transmitter_thread = std::jthread([this]() { handleTransmitThreads(); });
+
 		while (maintain_connection.load())
 		{
+			// This will only return once all registered event sources (controller and channels) have finished
 			event_base_dispatch(evbase_);
 
 			if (maintain_connection.load())
 			{
+				// Stop the transmit thread here - important
+				transmit_active.store(false);
+				transmitter_thread.join();
+				transmit_functions_.clear();
+
 				// Stop the channels - get rid of the old channel info that is now no longer working and will be connected to an obsolete connection
 				for (auto& tx_channel_wrapper : tx_channel_wrappers_)
 				{
@@ -281,6 +293,7 @@ public:
 						, channel_wrapper.second.listener()
 						, channel_wrapper.second.listener()->getNumberOfTransmittedMessages()
 						);
+					transmit_functions_.emplace_back(std::bind(&MyAmqpTxChannel::sendData, tx_channel.get(), std::placeholders::_1));
 					channel_wrapper.second.setChannel(std::move(tx_channel));
 				}
 
@@ -290,6 +303,9 @@ public:
 				std::cout << "Finished reconnecting to " << address_ << std::endl;
 			}
 		}
+
+		transmit_active.store(false);
+		transmitter_thread.join();
 		event_base_free(evbase_);
 
 		// We need to let the deconstructor know that we are done with all the event bits
@@ -360,6 +376,29 @@ public:
 	}
 
 private:
+	void handleTransmitThreads()
+	{
+		// Current number of messages transmitted in a loop on the thread (too many messages at once can hog the CPU and starve other threads)
+		size_t current_batch_size_ = 0;
+
+		while (transmit_active.load())
+		{
+			const auto old_batch_size = current_batch_size_;
+			for (auto& fn : transmit_functions_)
+			{
+				if (transmit_active.load())
+				{
+					fn(current_batch_size_);
+				}
+			}
+			if (old_batch_size == current_batch_size_ || current_batch_size_ > MAX_BATCH_SIZE)
+			{
+				current_batch_size_ = 0;
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
+		}
+	}
+
 	// Main connection
 	std::string address_;
 	struct event_base *evbase_;
@@ -374,6 +413,13 @@ private:
 	// Channel handling
 	std::unordered_map<std::string, MyAmqpTxChannelInfo> tx_channel_wrappers_;
 	std::unordered_map<std::string, MyAmqpRxChannelInfo> rx_channel_wrappers_;
+	std::vector<std::function<void( size_t &batch_size)>> transmit_functions_ ;
+
+	// Transmitting on multiple channels
+	std::jthread transmitter_thread;
+	std::atomic<bool> transmit_active {false};
+	const static size_t MAX_BATCH_SIZE = 200; // used to prevent the transmit side hogging all the processing time
+
 
 	// Set this to true when we have finished with processing events and cleaned up
 	std::atomic<bool> is_connection_finished_with {false};

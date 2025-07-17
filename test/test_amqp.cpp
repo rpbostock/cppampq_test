@@ -3,6 +3,7 @@
 #include "my_amqp_controller_no_channel.hpp"
 #include "my_amqp_controller.hpp"
 #include "rx_client_wrapper.hpp"
+#include "tx_client_wrapper.hpp"
 
 TEST_F(TestAmqp, testStartStopExampleWithSingleChannel_short)
 {
@@ -212,7 +213,8 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages)
 	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
 	rmq::ChannelConfig config {"testTransmitChannel_short_exchange", "testTransmitChannel_short_queue", "testTransmitChannel_short_routing"};
 	auto channel_listener = std::make_shared<rmq::ChannelListener>();
-	controller.createTransmitChannel(config, channel_listener);
+	auto channel_name = controller.createTransmitChannel(config, channel_listener);
+	TxClientWrapper wrapper(channel_name, channel_listener, controller.getTxQueue(channel_name));
 	controller.start();
 
 	// Ensure we're up and running
@@ -480,9 +482,19 @@ void TestAmqp::testMultipleTxRxChannelsAsync_(const size_t num_messages, const s
 	}
 }
 
+/**
+ * WARNING: This is very inefficient in terms of use of multiple threads, and doesn't scale well. Needs to be reimplemented
+ * such that all transmits are done from a single thread, and all receives handled by a single thread.
+ * WARNING: The AmpqTxChannel currently has a thread per transmit which is inefficient if scaled to multiple channels. Needs to be
+ * reimplemented so that all channels share a transmit thread.
+ *
+ * @param controller
+ * @param entry
+ * @param num_messages
+ */
 void TestAmqp::testSingleTxRxChannelsAsync_(rmq::MyAmqpController &controller
-	, const std::shared_ptr<TxRxThreadEntry>& entry
-	, size_t num_messages)
+                                            , const std::shared_ptr<TxRxThreadEntry>& entry
+                                            , size_t num_messages)
 {
 	auto config = entry->getChannelConfig();
 	config.qos_prefetch_count = 200;
