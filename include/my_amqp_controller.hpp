@@ -168,7 +168,7 @@ public:
 		// std::cout << "MyAmqpController::~MyAmqpController() - done" << std::endl;
 	}
 
-	std::string createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
+	TxClientWrapper createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		if (!listener)
@@ -186,8 +186,8 @@ public:
 			, listener);
 		transmit_functions_.emplace_back(std::bind(&MyAmqpTxChannel::sendData, tx_channel.get(), std::placeholders::_1));
 		tx_channel_wrappers_.emplace(channel_name, MyAmqpTxChannelInfo(std::move(tx_channel), listener, queue, config));
-		return channel_name;
-		// return TxClientWrapper(channel_name, listener, queue);
+
+		return TxClientWrapper(channel_name, listener, queue);
 	}
 
 	std::string createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
@@ -375,6 +375,13 @@ public:
 		it->second.acknowledge(ack);
 	}
 
+	void setMaxTransmitBatchSize(const size_t size)
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		if (size >= 10) { max_tx_batch_size_ = size; }
+		else { throw std::runtime_error("Max transmit batch size must be >= 10"); }
+	}
+
 private:
 	void handleTransmitThreads()
 	{
@@ -391,7 +398,7 @@ private:
 					fn(current_batch_size_);
 				}
 			}
-			if (old_batch_size == current_batch_size_ || current_batch_size_ > MAX_BATCH_SIZE)
+			if (old_batch_size == current_batch_size_ || current_batch_size_ > max_tx_batch_size_)
 			{
 				current_batch_size_ = 0;
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
@@ -418,8 +425,9 @@ private:
 	// Transmitting on multiple channels
 	std::jthread transmitter_thread;
 	std::atomic<bool> transmit_active {false};
-	const static size_t MAX_BATCH_SIZE = 200; // used to prevent the transmit side hogging all the processing time
 
+	// used to prevent the transmit side hogging all the processing time
+	size_t max_tx_batch_size_ = 500;
 
 	// Set this to true when we have finished with processing events and cleaned up
 	std::atomic<bool> is_connection_finished_with {false};

@@ -31,7 +31,7 @@ struct ChannelConfig
 	std::string queue_name = "";
 	std::string routing_key = "";
 	size_t queue_size = 100;
-	uint8_t qos_prefetch_count = 1;
+	uint8_t qos_prefetch_count = 100;
 	bool consume = true;
 };
 

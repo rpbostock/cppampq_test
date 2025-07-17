@@ -171,7 +171,7 @@ std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std
 			std::this_thread::sleep_for(interval);
 			LOG_INFO("Forcing close of connections by timer interval after delay of " << interval.count() << "ms");
 			rc = forceCloseConnections_();
-			if (rc == 0)
+				if (rc == 0)
 			{
 				GTEST_LOG_(INFO) << "All connections closed.";
 			}
@@ -195,66 +195,94 @@ int TestAmqp::forceCloseConnections_()
 
 TEST_F(TestAmqp, testTransmitChannel_short	)
 {
-	GTEST_LOG_(INFO) << "Test that we can send some messages successfully to an exchange - no feedback at this point";
-	testTransmitChannel_(100);
+	constexpr size_t num_messages = 100;
+	constexpr size_t num_channels = 1;
+	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
+	testTransmitChannel_(num_messages, num_channels);
 }
 
-TEST_F(TestAmqp, testTransmitChannel_long	)
+TEST_F(TestAmqp, testTransmitChannel_long)
 {
-	GTEST_LOG_(INFO) << "Test that we can send 1M messages successfully to an exchange - no feedback at this point";
-	testTransmitChannel_(1E6);
+	constexpr size_t num_messages = 1E6;
+	constexpr size_t num_channels = 1;
+	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
+	testTransmitChannel_(num_messages, num_channels);
+}
+
+TEST_F(TestAmqp, testTransmitMultipleChannels_short	)
+{
+	constexpr size_t num_messages = 100;
+	constexpr size_t num_channels = 10;
+	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
+	testTransmitChannel_(num_messages, num_channels);
+}
+
+TEST_F(TestAmqp, testTransmitMultipleChannels_long)
+{
+	constexpr size_t num_messages = 1E6;
+	constexpr size_t num_channels = 10;
+	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
+	testTransmitChannel_(num_messages, num_channels);
 }
 
 
 
-void TestAmqp::testTransmitChannel_(const size_t num_messages)
+void TestAmqp::testTransmitChannel_(const size_t num_messages, const int num_channels)
 {
 	// Basic setup
 	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
-	rmq::ChannelConfig config {"testTransmitChannel_short_exchange", "testTransmitChannel_short_queue", "testTransmitChannel_short_routing"};
-	auto channel_listener = std::make_shared<rmq::ChannelListener>();
-	auto channel_name = controller.createTransmitChannel(config, channel_listener);
-	TxClientWrapper wrapper(channel_name, channel_listener, controller.getTxQueue(channel_name));
+	controller.setMaxTransmitBatchSize(10000); // We're only interested in transmission so we can put this very high
 	controller.start();
+
+	std::vector<TxClientWrapper> transmitters;
+	for (auto i=0; i<num_channels; i++)
+	{
+		rmq::ChannelConfig config {"testTransmitChannel_exchange" + std::to_string(i)
+			, ""
+			, ""};
+		const auto channel_listener = std::make_shared<rmq::ChannelListener>();
+		transmitters.emplace_back(controller.createTransmitChannel(config, channel_listener));
+	}
 
 	// Ensure we're up and running
 	auto start = std::chrono::high_resolution_clock::now();
-	while ((!controller.isConnectionReady()	|| !channel_listener->isActive())
+	while (!(controller.isConnectionReady()	&& std::ranges::all_of(transmitters,[](const auto &entry){ return entry.getListener()->isActive(); }))
 		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
 	GTEST_ASSERT_TRUE(controller.isConnectionReady());
-	GTEST_ASSERT_TRUE(channel_listener->isActive());
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters,[](const auto &entry){ return entry.getListener()->isActive(); }));
 
 	// Send some messages
-	const auto queue = controller.getTxQueue(config.exchange_name);
-	GTEST_ASSERT_TRUE(queue != nullptr);
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue() != nullptr; }));
 
 	std::atomic<bool> send_complete(false);
-	std::jthread send_thread([&queue, &send_complete, num_messages]()
+	std::jthread send_thread([&transmitters, &send_complete, num_messages]()
 	{
 		for (size_t i=0; i<num_messages; i++)
 		{
 			std::string message = "test message " + std::to_string(i);
 			auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
-			queue->push(message_vec);
+			for (auto &entry : transmitters)
+			{
+				entry.getQueue()->push(message_vec);
+			}
 		}
 		send_complete.store(true);
 	});
 
 	// Wait for them all to be sent
 	start = std::chrono::high_resolution_clock::now();
-	while (!(queue->isEmpty()
-		&& channel_listener->getNumberOfTransmittedMessages() == num_messages
+	while ( !(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfTransmittedMessages() == num_messages; })
 		&& send_complete.load())
-		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages))
+		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages) * num_channels)
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
-	GTEST_ASSERT_TRUE(queue->isEmpty());
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue()->isEmpty(); }));
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfTransmittedMessages() == num_messages; }));
 	GTEST_ASSERT_TRUE(send_complete.load());
-	GTEST_ASSERT_EQ(channel_listener->getNumberOfTransmittedMessages(), num_messages);
 
 }
 
@@ -359,7 +387,7 @@ void TestAmqp::testReceiveChannelAsync_(const size_t num_messages)
 	const auto rx_channel_listener = std::make_shared<rmq::ChannelListener>();
 	const auto tx_channel_listener = std::make_shared<rmq::ChannelListener>();
 	const std::string rx_channel_name = controller.createReceiveChannel(config, rx_channel_listener);
-	const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener);
+	const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener).getChannelName();
 	controller.start();
 
 	// Ensure we're up and running
@@ -504,7 +532,7 @@ void TestAmqp::testSingleTxRxChannelsAsync_(rmq::MyAmqpController &controller
 			const auto rx_channel_listener = std::make_shared<rmq::ChannelListener>();
 			const auto tx_channel_listener = std::make_shared<rmq::ChannelListener>();
 			const std::string rx_channel_name = controller.createReceiveChannel(config, rx_channel_listener);
-			const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener);
+			const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener).getChannelName();
 
 			// Ensure we're up and running
 			auto start = std::chrono::high_resolution_clock::now();
@@ -603,7 +631,7 @@ void TestAmqp::testSingleTxMultipleRx_(const size_t num_messages, const size_t n
 
 	// Need a single transmitter
 	const auto tx_channel_listener = std::make_shared<rmq::ChannelListener>();
-	const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener);
+	const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener).getChannelName();
 
 	std::set<RxClientWrapper> rx_clients;
 	for (int i=0; i<num_rx_channels; i++)

@@ -80,7 +80,9 @@ private:
 	// Verification of purely transmit items
 	FRIEND_TEST(TestAmqp, testTransmitChannel_short);
 	FRIEND_TEST(TestAmqp, testTransmitChannel_long);
-	static void testTransmitChannel_(const size_t num_messages);
+	FRIEND_TEST(TestAmqp, testTransmitMultipleChannels_short);
+	FRIEND_TEST(TestAmqp, testTransmitMultipleChannels_long);
+	static void testTransmitChannel_(size_t num_messages, int num_channels = 1);
 	static std::chrono::seconds getTransmitTimeout_(const size_t num_messages);
 
 
