@@ -6,6 +6,8 @@
 #include <amqpcpp/address.h>
 #include <amqpcpp/libevent.h>
 
+using namespace AMQP;
+
 class MySTLibEventHandler : public AMQP::LibEventHandler
 {
 public:
@@ -25,11 +27,6 @@ public:
 		is_ready_.store(true);
 	}
 
-	void onClosed(TcpConnection *connection) override
-	{
-		std::cout << "onClosed" << std::endl;
-	}
-
 	bool isReady()
 	{
 		return is_ready_.load() ;
@@ -41,34 +38,8 @@ private:
 
 class MyAmqpControllerSingleThread {
 public:
-    MyAmqpControllerSingleThread() {
-        evbase = event_base_new();
-        handler = std::make_unique<MySTLibEventHandler>(evbase);
-        connection = std::make_unique<AMQP::TcpConnection>(handler.get(),
-            AMQP::Address("amqp://guest:guest@localhost/"));
-
-        // Create a notification pipe
-        if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, notification_pipe) < 0) {
-            throw std::runtime_error("Failed to create notification pipe");
-        }
-        evutil_make_socket_nonblocking(notification_pipe[0]);
-        evutil_make_socket_nonblocking(notification_pipe[1]);
-
-        // Create event for the read end of the pipe
-        close_event = event_new(evbase, notification_pipe[0],
-            EV_READ | EV_PERSIST, &MyAmqpControllerSingleThread::close_callback, this);
-        event_add(close_event, nullptr);
-    }
-
-    ~MyAmqpControllerSingleThread() {
-        if (close_event) {
-        	event_del(close_event);
-            event_free(close_event);
-        }
-        evutil_closesocket(notification_pipe[0]);
-        evutil_closesocket(notification_pipe[1]);
-    	event_base_free(evbase);
-    }
+    MyAmqpControllerSingleThread() {};
+    ~MyAmqpControllerSingleThread() {};
 
     void triggerCloseEvent() {
         std::cout << "triggerCloseEvent" << std::endl;
@@ -79,23 +50,37 @@ public:
         }
     }
 
-    // This version is thread-safe and can be called from any thread
-    void notifyEventLoop() {
-        if (!evbase) return;
-
-        // Thread-safe way to break the event loop
-        event_base_loopexit(evbase, nullptr);
-    }
-
 	bool isConnectionReady() const
     {
+    	if (!handler) { return false;}
     	return handler->isReady();
     }
 
 
 	void run()
     {
+    	evbase = event_base_new();
+    	handler = std::make_unique<MySTLibEventHandler>(evbase);
+    	connection = std::make_unique<AMQP::TcpConnection>(handler.get(), AMQP::Address("amqp://guest:guest@localhost/"));
+
+    	// Create a notification pipe
+    	if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, notification_pipe) < 0) {
+    		throw std::runtime_error("Failed to create notification pipe");
+    	}
+    	evutil_make_socket_nonblocking(notification_pipe[0]);
+    	evutil_make_socket_nonblocking(notification_pipe[1]);
+
+    	// Create event for the read end of the pipe
+    	close_event = event_new(evbase, notification_pipe[0],
+			EV_READ | EV_PERSIST, &MyAmqpControllerSingleThread::close_callback, this);
+    	event_add(close_event, nullptr);
+
     	event_base_dispatch(evbase);
+
+    	event_free(close_event);
+    	evutil_closesocket(notification_pipe[0]);
+    	evutil_closesocket(notification_pipe[1]);
+    	event_base_free(evbase);
     }
 
 private:
@@ -105,14 +90,20 @@ private:
 
         // Clear the pipe
         char buf[1024];
-        while (recv(fd, buf, sizeof(buf), 0) > 0) {}
+    	int num_rx = 0;
+        while (recv(fd, buf, sizeof(buf), 0) > 0 && num_rx < 1)
+        {
+	        ++num_rx;
+        }
 
+    	std::cout << "close_callback - num_rx: " << num_rx << std::endl;
         self->connection->close();
+    	event_del(self->close_event);
     }
 
-    evutil_socket_t notification_pipe[2];
     struct event_base *evbase;
     struct event *close_event{nullptr};
+    evutil_socket_t notification_pipe[2];
     std::unique_ptr<MySTLibEventHandler> handler;
     std::unique_ptr<AMQP::TcpConnection> connection;
 };
