@@ -8,6 +8,7 @@ FetchContent_Declare(
   GIT_REPOSITORY "https://github.com/CopernicaMarketingSoftware/AMQP-CPP.git"
   GIT_TAG "v4.3.27"
   SOURCE_DIR  ${CMAKE_BINARY_DIR}/external/amqp-cpp
+  CMAKE_ARGS -DCMAKE_BUILD_TYPE=Debug
 )
 
 set(AMQP-CPP_LINUX_TCP ON CACHE BOOL "" FORCE)

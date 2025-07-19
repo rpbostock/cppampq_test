@@ -2,6 +2,8 @@
 #include "my_amqp_controller_example.hpp"
 #include "my_amqp_controller_no_channel.hpp"
 #include "my_amqp_controller.hpp"
+#include "my_amqp_controller_single_thread.hpp"
+
 
 TEST_F(TestAmqp, testStartStopExampleWithSingleChannel_short)
 {
@@ -34,22 +36,41 @@ bool TestAmqp::testStartStopExampleWithSingleChannel_(int num_repeats, int num_t
 TEST_F(TestAmqp, testStartStopExampleWithNoChannel_short)
 {
 	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
-	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1, 1));
-	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1000, 10));
+	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(10000, 10));
+	// GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(10000, 10));
+	// GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1000, 10));
 }
 
 bool TestAmqp::testStartStopExampleWithNoChannel_(int num_repeats, int num_threads)
 {
-	for (int i = 0; i < num_repeats; i++)
+	for (int repeat = 0; repeat < num_repeats; repeat++)
 	{
 		std::vector<std::thread> myThreads(num_threads);
-		for (auto &thread : myThreads)
+		std::vector<MyAmqpControllerNoChannel> controllers(num_threads);
+		for (auto t=0; t<num_threads; t++)
 		{
-			thread = std::thread([]() {
-				MyAmqpControllerNoChannel controller;
+			auto &controller = controllers[t];
+			myThreads[t] = std::thread([&controller]() {
 				controller.run();
 			});
 		}
+
+		while (!std::ranges::all_of(controllers, [](auto &entry) { return entry.isConnectionReady(); }))
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+
+		for (auto &controller : controllers)
+		{
+			controller.close();
+		}
+
+		while (std::ranges::any_of(controllers, [](auto &entry) { return entry.isRequestClose(); }))
+		{
+			std::ranges::for_each(controllers, [](auto &entry) { entry.nudge_event_loop(); });
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+		std::ranges::for_each(controllers, [](auto &entry) { entry.nudge_event_loop(); });
 
 		for (auto &thread : myThreads)
 		{
@@ -62,13 +83,13 @@ bool TestAmqp::testStartStopExampleWithNoChannel_(int num_repeats, int num_threa
 TEST_F(TestAmqp, testStartStopRealNoChannel_short)
 {
 	GTEST_LOG_(INFO) << "Start and stop without a channel once.";
-	GTEST_ASSERT_TRUE(testStartStopRealNoChannel_(1, 1));
+	GTEST_ASSERT_TRUE(testStartStopRealNoChannel_(1000, 1));
 }
 
 TEST_F(TestAmqp, testStartStopRealNoChannel_long)
 {
 	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
-	GTEST_ASSERT_TRUE(testStartStopRealNoChannel_(100, 10));
+	GTEST_ASSERT_TRUE(testStartStopRealNoChannel_(1000, 10));
 }
 
 bool TestAmqp::testStartStopRealNoChannel_(int num_repeats, int num_threads)
@@ -179,4 +200,71 @@ std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, std::chro
 		}
 	});
 	return forceClose;
+}
+
+
+TEST_F(TestAmqp, testStartStopSTWithNoChannel_short)
+{
+	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
+	GTEST_ASSERT_TRUE(testStartStopSTWithNoChannel2_(1, 1));
+	GTEST_ASSERT_TRUE(testStartStopSTWithNoChannel2_(1000, 10));
+	// GTEST_ASSERT_TRUE(testStartStopSTWithNoChannel_(1, 1));
+	// GTEST_ASSERT_TRUE(testStartStopSTWithNoChannel_(1000, 10));
+}
+
+bool TestAmqp::testStartStopSTWithNoChannel_(int num_repeats, int num_threads)
+{
+	for (int i = 0; i < num_repeats; i++)
+	{
+		std::cout << "Starting repeat " << i << std::endl;
+		std::vector<std::thread> myThreads(num_threads);
+		for (auto &thread : myThreads)
+		{
+			thread = std::thread([]() {
+				MyAmqpControllerSingleThread controller;
+				controller.run();
+			});
+		}
+
+		for (auto &thread : myThreads)
+		{
+			thread.join();
+		}
+	}
+	return true;
+}
+
+bool TestAmqp::testStartStopSTWithNoChannel2_(int num_repeats, int num_threads)
+{
+	event_enable_debug_mode();
+
+	for (int repeat = 0; repeat < num_repeats; repeat++)
+	{
+		std::vector<std::thread> myThreads(num_threads);
+		std::vector<MyAmqpControllerSingleThread> controllers(num_threads);
+		for (auto t=0; t<num_threads; t++)
+		{
+			auto &controller = controllers[t];
+			myThreads[t] = std::thread([&controller]() {
+				controller.run();
+			});
+		}
+
+		while (!std::ranges::all_of(controllers, [](auto &entry) { return entry.isConnectionReady(); }))
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+
+		for (auto &controller : controllers)
+		{
+			controller.triggerCloseEvent();
+			controller.notifyEventLoop();
+		}
+
+		for (auto &thread : myThreads)
+		{
+			thread.join();
+		}
+	}
+	return true;
 }

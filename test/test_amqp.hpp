@@ -38,4 +38,9 @@ private:
 	static bool testStartStopExampleWithNoChannel_(int num_repeats, int num_threads);
 	FRIEND_TEST(TestAmqp, testStartStopExampleWithSingleChannel_short);
 	FRIEND_TEST(TestAmqp, testStartStopExampleWithNoChannel_short);
+
+	// Yeugh - having to do this again
+	FRIEND_TEST(TestAmqp, testStartStopSTWithNoChannel_short);
+	static bool testStartStopSTWithNoChannel_(int num_repeats, int num_threads);
+	static bool testStartStopSTWithNoChannel2_(int num_repeats, int num_threads);
 };
