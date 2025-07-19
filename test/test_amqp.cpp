@@ -67,10 +67,10 @@ bool TestAmqp::testStartStopExampleWithNoChannel_(int num_repeats, int num_threa
 
 		while (std::ranges::any_of(controllers, [](auto &entry) { return entry.isRequestClose(); }))
 		{
-			std::ranges::for_each(controllers, [](auto &entry) { entry.nudge_event_loop(); });
+			// std::ranges::for_each(controllers, [](auto &entry) { entry.nudge_event_loop(); });
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
-		std::ranges::for_each(controllers, [](auto &entry) { entry.nudge_event_loop(); });
+		// std::ranges::for_each(controllers, [](auto &entry) { entry.nudge_event_loop(); });
 
 		for (auto &thread : myThreads)
 		{

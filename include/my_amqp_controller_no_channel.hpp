@@ -61,11 +61,11 @@ public:
 		}
 	}
 
-	void nudge_event_loop()
+	void check_event_loop()
 	{
 		int num_events = event_base_get_num_events(evbase, EVENT_BASE_COUNT_ADDED);
 		std::string msg = "Number of active events is: " + std::to_string(num_events);
-		event_base_loopcontinue(evbase);
+		std::cout << msg << std::endl;
 	}
 
 	void run()
