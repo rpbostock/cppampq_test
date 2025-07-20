@@ -17,7 +17,7 @@ namespace rmq
 class MyLibEventHandler final : public AMQP::LibEventHandler
 {
 public:
-	explicit MyLibEventHandler(struct event_base *evbase) : LibEventHandler(evbase)
+	explicit MyLibEventHandler(struct event_base *evbase, std::vector<event*> &events) : LibEventHandler(evbase), events_(events)
 	{
 
 	}
@@ -34,7 +34,14 @@ public:
 	{
 		std::cout << "onError - connection error: " << message << std::endl;
 		is_error_ = true;
+		for (const auto& event : events_)
+		{
+			event_del(event);
+			event_free(event);
+		}
+		events_.clear();
 		connection->close();
+		// TODO Need to be able to signal back to the AmqpController that we need to cleanup other events
 	}
 
 	bool isError() const
@@ -48,6 +55,7 @@ public:
 	}
 
 private:
+	std::vector<event*> &events_;
 	std::atomic<bool> is_ready_ {false};
 	std::atomic<bool> is_error_ {false};
 
@@ -250,28 +258,16 @@ public:
 	{
 		while (maintain_connection.load())
 		{
-			// Core AMQP connection bits
-			evbase_ = event_base_new();
-			handler_ = std::make_unique<MyLibEventHandler>(evbase_);
-			connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
-
-			// Create a notification pipe to talk to libevent
-			if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, notification_pipe) < 0) {
-				throw std::runtime_error("Failed to create notification pipe");
-			}
-			evutil_make_socket_nonblocking(notification_pipe[0]);
-			evutil_make_socket_nonblocking(notification_pipe[1]);
-
-			// Create event for the read end of the pipe - you write to notification_pipe[1]
-			auto notification_event = event_new(evbase_, notification_pipe[0],
-				EV_READ | EV_PERSIST, &MyAmqpController::notification_callback_, this);
-			event_add(notification_event, nullptr);
-			events_.push_back(notification_event);
+			establishAmqpConnection_();
 
 			// This will only return once all registered event sources (controller and channels) have finished
 			event_base_dispatch(evbase_);
 
-			// If we get to here we could need to reconnect, but we can ignore this at the moment
+			cleanUpAmqpConnection_();
+
+			++num_reconnections;
+			LOG_INFO("Finished reconnecting to " << address_);
+
 #if 0
 			if (maintain_connection.load())
 			{
@@ -319,23 +315,10 @@ public:
 
 				// Reset the receivers TODO
 
-				++num_reconnections;
-				std::cout << "Finished reconnecting to " << address_ << std::endl;
+
 			}
 #endif
 		}
-
-		// cmd_transmit_active.store(false); // stop trying to transmit
-		for (const auto& event : events_)
-		{
-			event_free(event);
-		}
-		events_.clear();
-		evutil_closesocket(notification_pipe[0]);
-		evutil_closesocket(notification_pipe[1]);
-		connection_.reset(); // this has already stopped, and the event queue is no longer processing
-		handler_.reset();
-		event_base_free(evbase_);
 	}
 
 	int getNumReconnections() const
@@ -432,6 +415,42 @@ public:
 
 private:
 
+	void cleanUpAmqpConnection_()
+	{
+		for (const auto& event : events_)
+		{
+			event_free(event);
+		}
+		events_.clear();
+		evutil_closesocket(notification_pipe[0]);
+		evutil_closesocket(notification_pipe[1]);
+
+		connection_.reset();
+		handler_.reset();
+		event_base_free(evbase_);
+	}
+
+	void establishAmqpConnection_()
+	{
+		// Core AMQP connection bits
+		evbase_ = event_base_new();
+		handler_ = std::make_unique<MyLibEventHandler>(evbase_, events_);
+		connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
+
+		// Create a notification pipe to talk to libevent
+		if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, notification_pipe) < 0) {
+			throw std::runtime_error("Failed to create notification pipe");
+		}
+		evutil_make_socket_nonblocking(notification_pipe[0]);
+		evutil_make_socket_nonblocking(notification_pipe[1]);
+
+		// Create event for the read end of the pipe - you write to notification_pipe[1]
+		auto notification_event = event_new(evbase_, notification_pipe[0],
+											EV_READ | EV_PERSIST, &MyAmqpController::notification_callback_, this);
+		event_add(notification_event, nullptr);
+		events_.push_back(notification_event);
+	}
+
 	static void notification_callback_(evutil_socket_t fd, short events, void* arg) {
 		LOG_DEBUG("notification callback");
 
@@ -471,6 +490,7 @@ private:
 	void hard_close_()
 	{
 		// Remove additional locally created events (not amqp-cpp events) e.g. notification pipe, timer events for tx, etc.
+		// TODO - consider doing this on connection->close()? That should get rid of all the duplicate code...
 		for (const auto& event : events_)
 		{
 			event_del(event);
