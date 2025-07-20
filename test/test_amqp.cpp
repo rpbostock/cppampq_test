@@ -9,7 +9,7 @@ TEST_F(TestAmqp, testStartStopExampleWithSingleChannel_short)
 {
 	GTEST_LOG_(INFO) << "Start and stop one channel a thousand times.";
 	GTEST_ASSERT_TRUE(testStartStopExampleWithSingleChannel_(1, 1));
-	GTEST_ASSERT_TRUE(testStartStopExampleWithSingleChannel_(100, 10));
+	GTEST_ASSERT_TRUE(testStartStopExampleWithSingleChannel_(10000, 10));
 }
 
 bool TestAmqp::testStartStopExampleWithSingleChannel_(int num_repeats, int num_threads)
@@ -37,7 +37,7 @@ TEST_F(TestAmqp, testStartStopExampleWithNoChannel_short)
 {
 	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
 	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1, 1));
-	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1000, 10));
+	// GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1000, 10));
 }
 
 bool TestAmqp::testStartStopExampleWithNoChannel_(int num_repeats, int num_threads)

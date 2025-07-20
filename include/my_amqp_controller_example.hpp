@@ -13,9 +13,6 @@ class MyAmqpControllerExample {
 public:
 	MyAmqpControllerExample()
 	{
-		evbase = event_base_new();
-		handler = std::make_unique<AMQP::LibEventHandler>(evbase);
-		connection = std::make_unique<AMQP::TcpConnection>(handler.get(), AMQP::Address("amqp://guest:guest@localhost/"));
 	}
 	~MyAmqpControllerExample()
 	{
@@ -24,6 +21,10 @@ public:
 
 	void run()
 	{
+		evbase = event_base_new();
+		handler = std::make_unique<AMQP::LibEventHandler>(evbase);
+		connection = std::make_unique<AMQP::TcpConnection>(handler.get(), AMQP::Address("amqp://guest:guest@localhost/"));
+
 		// we need a channel too
 		AMQP::TcpChannel channel(connection.get());
 
