@@ -84,7 +84,7 @@ TEST_F(TestAmqp, testStartStopRealNoChannel_short)
 TEST_F(TestAmqp, testStartStopRealNoChannel_long)
 {
 	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
-	GTEST_ASSERT_TRUE(testStartStopRealNoChannel_(1000, 10));
+	GTEST_ASSERT_TRUE(testStartStopRealNoChannel_(10000, 10));
 }
 
 bool TestAmqp::testStartStopRealNoChannel_(int num_repeats, int num_threads)

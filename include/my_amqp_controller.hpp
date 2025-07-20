@@ -142,29 +142,26 @@ public:
 class MyAmqpController {
 public:
 	using TxChannelHandlerPtr = std::shared_ptr<MyAmqpTxChannel>;
-	explicit MyAmqpController(const std::string& address) : address_(address)
+	explicit MyAmqpController(const std::string& address) :
+		address_(address)
+		, evbase_(nullptr)
 	{
-		evbase_ = event_base_new();
-		handler_ = std::make_unique<MyLibEventHandler>(evbase_);
-		connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
+
 	}
 
 	~MyAmqpController()
 	{
 		// std::cout << "MyAmqpController::~MyAmqpController()" << std::endl;
-
-		// Indicate we're ready to finish. This stops the re-connection logic
-		maintain_connection.store(false);
+		if (maintain_connection.load())
+		{
+			maintain_connection.store(false);
+			triggerClose();
+		}
 
 		// Close the connection - this should also stop the event handling loop when complete
-		connection_->close();
+		// TODO Use a notification pipe to close this
+		// connection_->close();
 
-		// Wait for the connection to be finished with
-		while (!is_connection_finished_with.load())
-		{
-			// std::cout << "MyAmqpController::~MyAmqpController() - waiting for processing to complete" << std::endl;
-			std::this_thread::sleep_for(std::chrono::milliseconds(100));
-		}
 		maintain_connection_thread.join(); // TODO Probably don't need the flag above anymore
 		// std::cout << "MyAmqpController::~MyAmqpController() - done" << std::endl;
 	}
@@ -217,6 +214,7 @@ public:
 	bool isConnectionReady() const
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
+		if (!handler_) { return false; }
 		return handler_->isReady();
 	}
 
@@ -250,15 +248,31 @@ public:
 
 	void run()
 	{
-		// Start a transmit thread for all transmitter channels
-		cmd_transmit_active.store(true);
-		transmitter_thread = std::jthread([this]() { handleTransmitThreads(); });
-
 		while (maintain_connection.load())
 		{
+			// Core AMQP connection bits
+			evbase_ = event_base_new();
+			handler_ = std::make_unique<MyLibEventHandler>(evbase_);
+			connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
+
+			// Create a notification pipe to talk to libevent
+			if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, notification_pipe) < 0) {
+				throw std::runtime_error("Failed to create notification pipe");
+			}
+			evutil_make_socket_nonblocking(notification_pipe[0]);
+			evutil_make_socket_nonblocking(notification_pipe[1]);
+
+			// Create event for the read end of the pipe - you write to notification_pipe[1]
+			auto notification_event = event_new(evbase_, notification_pipe[0],
+				EV_READ | EV_PERSIST, &MyAmqpController::notification_callback_, this);
+			event_add(notification_event, nullptr);
+			events_.push_back(notification_event);
+
 			// This will only return once all registered event sources (controller and channels) have finished
 			event_base_dispatch(evbase_);
 
+			// If we get to here we could need to reconnect, but we can ignore this at the moment
+#if 0
 			if (maintain_connection.load())
 			{
 				// Stop the transmit thread here - important
@@ -308,16 +322,20 @@ public:
 				++num_reconnections;
 				std::cout << "Finished reconnecting to " << address_ << std::endl;
 			}
+#endif
 		}
 
-		cmd_transmit_active.store(false); // stop trying to transmit
-		transmit_exit.store(true); // and leave the thread
-		transmitter_thread.join();
-
+		// cmd_transmit_active.store(false); // stop trying to transmit
+		for (const auto& event : events_)
+		{
+			event_free(event);
+		}
+		events_.clear();
+		evutil_closesocket(notification_pipe[0]);
+		evutil_closesocket(notification_pipe[1]);
+		connection_.reset(); // this has already stopped, and the event queue is no longer processing
+		handler_.reset();
 		event_base_free(evbase_);
-
-		// We need to let the deconstructor know that we are done with all the event bits
-		is_connection_finished_with.store(true);
 	}
 
 	int getNumReconnections() const
@@ -326,7 +344,6 @@ public:
 		return num_reconnections.load();
 	}
 
-	// TODO Handle channel errors
 	void onChannelError(const std::string& channel_name, const char *message) const
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -335,6 +352,7 @@ public:
 		connection_->close();
 	}
 
+	// TODO do we still need this at all?
 	MyTxDataQueuePtr getTxQueue(const std::string& channel_name)
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -346,6 +364,7 @@ public:
 		return it->second.queue();
 	}
 
+	// TODO do we still need this at all?
 	MyRxDataQueuePtr getRxQueue(const std::string& channel_name)
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -357,6 +376,7 @@ public:
 		return it->second.queue();
 	}
 
+	// TODO do we still need this at all?
 	std::function<void(const IMessageAck& ack)> getAckFunction(const std::string& channel_name)
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -393,7 +413,76 @@ public:
 		else { throw std::runtime_error("Max transmit batch size must be >= 10"); }
 	}
 
+	void triggerClose()
+	{
+		// TODO Need a check to sanity check that we haven't already requested a close
+		// TODO Change this to be a lock on the notification queue later
+		std::lock_guard<std::mutex> lock(mutex_);
+		LOG_INFO("Triggering close");
+		char close_char = 'C';
+		if (int num_tx = send(notification_pipe[1], &close_char, 1, 0); num_tx > 0)
+		{
+			LOG_INFO("Sent close request");
+		}
+		else
+		{
+			LOG_FATAL("Failed to send close request to the notification pipe. Something has seriously gone wrong");
+		}
+	}
+
 private:
+
+	static void notification_callback_(evutil_socket_t fd, short events, void* arg) {
+		LOG_DEBUG("notification callback");
+
+		if (arg == nullptr)
+		{
+			throw std::runtime_error("notification callback arg is null");
+		}
+
+		// There is no good way to check type safety using void*
+		MyAmqpController* self = static_cast<MyAmqpController*>(arg);
+
+		// Clear the pipe - we've been notified that there's data, so there probably is
+		char buf[1024];
+		if (int num_rx = recv(fd, buf, sizeof(buf), 0); num_rx > 0)
+		{
+			// Hard close request = 'C'
+			if (std::ranges::find(buf, buf + num_rx, 'C') != buf + num_rx)
+			{
+				self->hard_close_();
+			}
+
+			// Acknowledgements before a soft close
+
+			// If soft close
+			// - Remaining transmits (happy to ignore batch limits now, but only as many transmits as are in the queue at present)
+			// - Then soft close
+
+			// Else
+			// - Batch transmits
+		}
+
+	}
+
+	/**
+	 * This ensures that we remove everything from the event queue so that we can exit that cleanly and restart if needed
+	 */
+	void hard_close_()
+	{
+		// Remove additional locally created events (not amqp-cpp events) e.g. notification pipe, timer events for tx, etc.
+		for (const auto& event : events_)
+		{
+			event_del(event);
+			event_free(event);
+		}
+		events_.clear();
+
+		// Close the connection
+		connection_->close();
+	}
+
+	// TODO This will become an event called on the event queue based on a trigger - either from a new timer event or the notification pipe
 	void handleTransmitThreads()
 	{
 		// Current number of messages transmitted in a loop on the thread (too many messages at once can hog the CPU and starve other threads)
@@ -430,6 +519,10 @@ private:
 	struct event_base *evbase_;
 	std::unique_ptr<MyLibEventHandler> handler_;
 	std::unique_ptr<AMQP::TcpConnection> connection_;
+
+	// Notification pipe setup
+	evutil_socket_t notification_pipe[2];
+	std::vector<event*> events_;
 
 	std::thread maintain_connection_thread;
 	// This indicates whether we should be trying to maintain connections or not
