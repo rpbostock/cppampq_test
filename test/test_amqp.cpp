@@ -44,29 +44,27 @@ bool TestAmqp::testStartStopExampleWithNoChannel_(int num_repeats, int num_threa
 {
 	for (int repeat = 0; repeat < num_repeats; repeat++)
 	{
-		std::vector<std::thread> myThreads(num_threads);
-		std::vector<MyAmqpControllerNoChannel> controllers(num_threads);
+		std::vector<std::thread> myThreads;
+		myThreads.reserve(num_threads);
+		std::vector<std::unique_ptr<MyAmqpControllerNoChannel>> controllers;
+		controllers.reserve(num_threads);
 		for (auto t=0; t<num_threads; t++)
 		{
-			auto &controller = controllers[t];
-			myThreads[t] = std::thread([&controller]() {
-				controller.run();
-			});
+			controllers.push_back(std::make_unique<MyAmqpControllerNoChannel>());
+			auto &controller = controllers.back();
+			myThreads.emplace_back(std::thread([&controller]() {
+				controller->run();
+			}));
 		}
 
-		while (!std::ranges::all_of(controllers, [](auto &entry) { return entry.isConnectionReady(); }))
+		while (!std::ranges::all_of(controllers, [](auto &entry) { return entry->isConnectionReady(); }))
 		{
 			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
 
 		for (auto &controller : controllers)
 		{
-			controller.close();
-		}
-
-		while (std::ranges::any_of(controllers, [](auto &entry) { return entry.isRequestClose(); }))
-		{
-			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			controller->triggerCloseEvent();
 		}
 
 		for (auto &thread : myThreads)

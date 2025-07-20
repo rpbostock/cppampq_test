@@ -1,117 +1,109 @@
 #pragma once
+
 #include <iostream>
 #include <memory>
 
 #include <amqpcpp/address.h>
 #include <amqpcpp/libevent.h>
 
-
 using namespace AMQP;
 
-class MyNoChannelLibEventHandler : public AMQP::LibEventHandler
+class MyNCLibEventHandler : public AMQP::LibEventHandler
 {
 public:
-	MyNoChannelLibEventHandler(struct event_base *evbase) : LibEventHandler(evbase)
+	MyNCLibEventHandler(struct event_base *evbase) : LibEventHandler(evbase)
 	{
+
 	}
 
-	virtual ~MyNoChannelLibEventHandler()
+	virtual ~MyNCLibEventHandler()
 	{
+
 	}
 
 	void onReady(AMQP::TcpConnection *connection) override
 	{
-		std::cout << "onReady - planning to close now" << std::endl;
+		std::cout << "onReady" << std::endl;
 		is_ready_.store(true);
 	}
 
-	bool isReady() const
+	bool isReady()
 	{
 		return is_ready_.load() ;
 	}
-
 private:
 	std::atomic<bool> is_ready_{false};
+
 };
 
-
-class MyAmqpControllerNoChannel
-{
+class MyAmqpControllerNoChannel {
 public:
-	MyAmqpControllerNoChannel()
-	{
+    MyAmqpControllerNoChannel() {};
+    ~MyAmqpControllerNoChannel() {};
 
-	}
-	~MyAmqpControllerNoChannel()
-	{
-	}
-
-	static void on_timeout(evutil_socket_t fd, short events, void* arg)
-	{
-		std::cout << "on_timeout" << std::endl;
-		MyAmqpControllerNoChannel* self = static_cast<MyAmqpControllerNoChannel*>(arg);
-		if ( self->request_close_.load() )
-		{
-			std::cout << "on_timeout - planning to close now" << std::endl;
-			self->connection->close();
-			event_del(self->timeout_event_);
-			self->request_close_.store(false);
-		}
-	}
-
-	void check_event_loop()
-	{
-		int num_events = event_base_get_num_events(evbase, EVENT_BASE_COUNT_ADDED);
-		std::string msg = "Number of active events is: " + std::to_string(num_events);
-		std::cout << msg << std::endl;
-	}
-
-	void run()
-	{
-		evbase = event_base_new();
-		handler = std::make_unique<MyNoChannelLibEventHandler>(evbase);
-		connection = std::make_unique<AMQP::TcpConnection>(handler.get(), AMQP::Address("amqp://guest:guest@localhost/"));
-
-		// Create a new event (EV_PERSIST for repeating)
-		struct timeval tv = {0, 100000}; // 0 seconds, 100000 microseconds = 100ms
-
-		timeout_event_ = event_new(evbase, -1, EV_PERSIST, on_timeout, this);
-		if (!timeout_event_) {
-			connection.reset();
-			handler.reset();
-			event_base_free(evbase);
-			throw std::runtime_error("Could not create timeout event.");
-		}
-
-		// Add the event with the initial timer
-		event_add(timeout_event_, &tv);
-		event_base_dispatch(evbase);
-		event_free(timeout_event_);
-		event_base_free(evbase);
-	}
+    void triggerCloseEvent() {
+        std::cout << "triggerCloseEvent" << std::endl;
+        // Thread-safe way to notify the event loop
+        char buf = 1;
+        if (send(notification_pipe[1], &buf, 1, 0) != 1) {
+            std::cerr << "Failed to write to notification pipe" << std::endl;
+        }
+    }
 
 	bool isConnectionReady() const
-	{
-		if (!handler) { return false;}
-		return handler->isReady();
-	}
+    {
+    	if (!handler) { return false;}
+    	return handler->isReady();
+    }
 
-	void close()
-	{
-		event_base_dump_events(evbase, stderr);
-		request_close_.store(true);
-	}
 
-	bool isRequestClose()
-	{
-		return request_close_.load();
-	}
+	void run()
+    {
+    	evbase = event_base_new();
+    	handler = std::make_unique<MyNCLibEventHandler>(evbase);
+    	connection = std::make_unique<AMQP::TcpConnection>(handler.get(), AMQP::Address("amqp://guest:guest@localhost/"));
+
+    	// Create a notification pipe
+    	if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, notification_pipe) < 0) {
+    		throw std::runtime_error("Failed to create notification pipe");
+    	}
+    	evutil_make_socket_nonblocking(notification_pipe[0]);
+    	evutil_make_socket_nonblocking(notification_pipe[1]);
+
+    	// Create event for the read end of the pipe
+    	close_event = event_new(evbase, notification_pipe[0],
+			EV_READ | EV_PERSIST, &MyAmqpControllerNoChannel::close_callback, this);
+    	event_add(close_event, nullptr);
+
+    	event_base_dispatch(evbase);
+
+    	event_free(close_event);
+    	evutil_closesocket(notification_pipe[0]);
+    	evutil_closesocket(notification_pipe[1]);
+    	event_base_free(evbase);
+    }
 
 private:
-	std::atomic<bool> request_close_ {false};
+    static void close_callback(evutil_socket_t fd, short events, void* arg) {
+        std::cout << "close_callback" << std::endl;
+        auto* self = static_cast<MyAmqpControllerNoChannel*>(arg);
 
-	struct event_base *evbase;
-	std::unique_ptr<MyNoChannelLibEventHandler> handler;
-	std::unique_ptr<AMQP::TcpConnection> connection;
-	struct event* timeout_event_;
+        // Clear the pipe
+        char buf[1024];
+    	int num_rx = 0;
+        while (recv(fd, buf, sizeof(buf), 0) > 0 && num_rx < 1)
+        {
+	        ++num_rx;
+        }
+
+    	std::cout << "close_callback - num_rx: " << num_rx << std::endl;
+        self->connection->close();
+    	event_del(self->close_event);
+    }
+
+    struct event_base *evbase;
+    struct event *close_event{nullptr};
+    evutil_socket_t notification_pipe[2];
+    std::unique_ptr<MyNCLibEventHandler> handler;
+    std::unique_ptr<AMQP::TcpConnection> connection;
 };
