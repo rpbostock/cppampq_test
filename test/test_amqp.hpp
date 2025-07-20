@@ -66,7 +66,7 @@ private:
 	};
 
 	// Force connections to close
-	static std::thread forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval);
+	static std::thread forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval, int& num_forced_reconnections);
 	static int forceCloseConnections_();
 
 	// Verification of start stop behaviour on the core connection and handler (excludes channels)

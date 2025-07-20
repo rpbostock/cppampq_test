@@ -22,7 +22,10 @@ public:
 
 	}
 
-	~MyLibEventHandler() = default;
+	~MyLibEventHandler()
+	{
+		clearupEvents_();
+	}
 
 	void onReady(AMQP::TcpConnection *connection) override
 	{
@@ -32,16 +35,16 @@ public:
 
 	void onError(AMQP::TcpConnection *connection, const char *message) override
 	{
-		std::cout << "onError - connection error: " << message << std::endl;
+		LOG_ERROR("onError - connection error: " << message);
 		is_error_ = true;
-		for (const auto& event : events_)
-		{
-			event_del(event);
-			event_free(event);
-		}
-		events_.clear();
-		connection->close();
-		// TODO Need to be able to signal back to the AmqpController that we need to cleanup other events
+		clearupEvents_();
+		connection->close(); // Suspect this may not be needed on an error, but just to be safe...
+	}
+
+	void onClosed(AMQP::TcpConnection *connection) override
+	{
+		LOG_DEBUG("onClosed - connection closed and clearing up events");
+		clearupEvents_();
 	}
 
 	bool isError() const
@@ -55,6 +58,17 @@ public:
 	}
 
 private:
+	void clearupEvents_()
+	{
+		for (const auto& event : events_)
+		{
+			event_del(event);
+			event_free(event);
+		}
+		events_.clear();
+	}
+
+
 	std::vector<event*> &events_;
 	std::atomic<bool> is_ready_ {false};
 	std::atomic<bool> is_error_ {false};
@@ -185,6 +199,7 @@ public:
 		auto channel_name = config.exchange_name;
 		auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection_.get());
 		auto queue = std::make_shared<MyTxDataQueue>(1000, QueueOverflowPolicy::WAIT); // possibly pass this in as a parameter?
+		// TODO Need to change this so that the error callback is actually a close on the AmqpConnection. As this will always be single threaded, this should be thread safe
 		auto tx_channel = std::make_unique<MyAmqpTxChannel>(std::move(amqp_channel)
 			, config
 			, [&config, this](const std::string &error_message) { onChannelError(config.queue_name, error_message.c_str()); }
@@ -265,8 +280,6 @@ public:
 
 			cleanUpAmqpConnection_();
 
-			++num_reconnections;
-			LOG_INFO("Finished reconnecting to " << address_);
 
 #if 0
 			if (maintain_connection.load())
@@ -323,16 +336,18 @@ public:
 
 	int getNumReconnections() const
 	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		return num_reconnections.load();
+		const int num_reconnections = std::max(0, num_connections.load() - 1);
+		LOG_DEBUG("Number of reconnections: " << num_reconnections);
+		return num_reconnections;
 	}
 
+	// TODO Shouldn't be using this any more
 	void onChannelError(const std::string& channel_name, const char *message) const
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		// Force a reconnection and restart of all the channels - from experience just restarting the affected channel doesn't work
 		LOG_ERROR(message);
-		connection_->close();
+		// connection_->close();
 	}
 
 	// TODO do we still need this at all?
@@ -449,6 +464,9 @@ private:
 											EV_READ | EV_PERSIST, &MyAmqpController::notification_callback_, this);
 		event_add(notification_event, nullptr);
 		events_.push_back(notification_event);
+
+		++num_connections;
+		LOG_INFO("Finished connecting to " << address_);
 	}
 
 	static void notification_callback_(evutil_socket_t fd, short events, void* arg) {
@@ -547,7 +565,7 @@ private:
 	std::thread maintain_connection_thread;
 	// This indicates whether we should be trying to maintain connections or not
 	std::atomic<bool> maintain_connection {true};
-	std::atomic<int> num_reconnections {0};
+	std::atomic<int> num_connections {0};
 
 	// Channel handling
 	std::unordered_map<std::string, MyAmqpTxChannelInfo> tx_channel_wrappers_;

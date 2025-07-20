@@ -130,15 +130,21 @@ TEST_F(TestAmqp, testReconnectionNoChannel_long)
 
 bool TestAmqp::testForceReconnectNoChannel_(int num_repeats, int num_threads)
 {
-	std::atomic enough_reconnections(true);
+	class ForceReconnectThreadWrapper
+	{
+	public:
+		std::thread thread;
+		int num_reconnections = 0;
+	};
+
 	for (int i = 0; i < num_repeats; i++)
 	{
-		std::cout << "Starting repeat " << i << std::endl;
+		LOG_DEBUG("Starting repeat " << i);
 		std::atomic finish(false);
-		std::vector<std::thread> myThreads(num_threads);
-		for (auto &thread : myThreads)
+		std::vector<ForceReconnectThreadWrapper> thread_wrappers(num_threads);
+		for (auto &thread_wrapper : thread_wrappers)
 		{
-			thread = std::thread([&finish, &enough_reconnections]()
+			thread_wrapper.thread = std::thread([&finish, &thread_wrapper]()
 			{
 				rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
 				controller.start();
@@ -146,33 +152,42 @@ bool TestAmqp::testForceReconnectNoChannel_(int num_repeats, int num_threads)
 				{
 					std::this_thread::sleep_for(std::chrono::milliseconds(100));
 				}
-				if (const auto reconnections = controller.getNumReconnections(); reconnections < 5)
-				{
-					std::cout << "Not enough reconnections - only had " << reconnections << std::endl;
-					enough_reconnections.store(false);
-				};
+				thread_wrapper.num_reconnections = controller.getNumReconnections();
 			});
 		}
 
 		// Small delay until we start forcing restarts on the connections
 		std::this_thread::sleep_for(std::chrono::milliseconds(100));
 		auto interval = std::chrono::milliseconds(5000);
-		auto forceDisconnectThread = forceCloseConnections(finish, interval);
+		int num_forced_reconnections = 0;
+		auto forceDisconnectThread = forceCloseConnections(finish, interval, num_forced_reconnections);
 		std::this_thread::sleep_for(std::chrono::seconds(60));
-		std::cout << "Finishing test off" << std::endl;
+		LOG_DEBUG("Finishing test off");
 		finish.store(true);
 
-		for (auto &thread : myThreads)
+		for (auto &thread : thread_wrappers)
 		{
-			thread.join();
+			thread.thread.join();
 		}
 		forceDisconnectThread.join();
+
+		LOG_DEBUG("Number of forced disconnects: " << num_forced_reconnections);
+		if (std::ranges::any_of(thread_wrappers, [&num_forced_reconnections](const auto &wrapper) { return abs(wrapper.num_reconnections - num_forced_reconnections) <= 1; }))
+		{
+			LOG_DEBUG("Not all threads had the same number of reconnections on repeat: " << i << ". Expected " << num_forced_reconnections);
+			for (auto &wrapper : thread_wrappers)
+			{
+				LOG_DEBUG("Wrapper " << wrapper.num_reconnections << " on repeat " << i);
+			}
+
+			return false;
+		}
 	}
 
-	return enough_reconnections.load();
+	return true;
 }
 
-std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval)
+std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval, int& num_forced_reconnections)
 {
 	std::atomic<int> rc(0);
 	std::thread forceClose([&interval, &finish, &rc]() {
@@ -183,7 +198,7 @@ std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std
 			rc = forceCloseConnections_();
 				if (rc == 0)
 			{
-				GTEST_LOG_(INFO) << "All connections closed.";
+				LOG_DEBUG("All connections closed.");
 			}
 			else
 			{
@@ -348,7 +363,8 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 
 	std::atomic<bool> finish(false);
 	auto interval = std::chrono::milliseconds(5000);
-	auto forceDisconnectThread = forceCloseConnections(finish, interval);
+	int num_force_disconnects = 0;
+	auto forceDisconnectThread = forceCloseConnections(finish, interval, num_force_disconnects);
 
 	// Wait for them all to be sent
 	start = std::chrono::high_resolution_clock::now();
