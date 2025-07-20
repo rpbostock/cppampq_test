@@ -36,21 +36,37 @@ bool TestAmqp::testStartStopExampleWithSingleChannel_(int num_repeats, int num_t
 TEST_F(TestAmqp, testStartStopExampleWithNoChannel_short)
 {
 	GTEST_LOG_(INFO) << "Start and stop without a channel a thousand times.";
-	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1, 1));
-	// GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1000, 10));
+	// GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(1, 1));
+	GTEST_ASSERT_TRUE(testStartStopExampleWithNoChannel_(10000, 10));
 }
 
 bool TestAmqp::testStartStopExampleWithNoChannel_(int num_repeats, int num_threads)
 {
-	for (int i = 0; i < num_repeats; i++)
+	for (int repeat = 0; repeat < num_repeats; repeat++)
 	{
 		std::vector<std::thread> myThreads(num_threads);
-		for (auto &thread : myThreads)
+		std::vector<MyAmqpControllerNoChannel> controllers(num_threads);
+		for (auto t=0; t<num_threads; t++)
 		{
-			thread = std::thread([]() {
-				MyAmqpControllerNoChannel controller;
+			auto &controller = controllers[t];
+			myThreads[t] = std::thread([&controller]() {
 				controller.run();
 			});
+		}
+
+		while (!std::ranges::all_of(controllers, [](auto &entry) { return entry.isConnectionReady(); }))
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
+		}
+
+		for (auto &controller : controllers)
+		{
+			controller.close();
+		}
+
+		while (std::ranges::any_of(controllers, [](auto &entry) { return entry.isRequestClose(); }))
+		{
+			std::this_thread::sleep_for(std::chrono::milliseconds(10));
 		}
 
 		for (auto &thread : myThreads)
