@@ -2,17 +2,20 @@
 #include "queue.hpp"
 #include "logging.hpp"
 #include "message_wrapper.hpp"
+#include "pipe_notification_queue.hpp"
 
 namespace rmq {
 
 enum class ChannelState { none, initialising, active, deactivating, inactive, error };
-using MyTxDataQueue = Queue<std::shared_ptr<std::vector<char>>>;
+using MyTxDataQueue = PipeNotificationQueue<std::shared_ptr<std::vector<char>>>;
 using MyTxDataQueuePtr = std::shared_ptr<MyTxDataQueue>;
 
+#if 0
 class RxMessageWrapper : public MessageWrapper<std::shared_ptr<std::vector<char>>>
 {};
 using MyRxDataQueue = Queue<RxMessageWrapper>;
 using MyRxDataQueuePtr = std::shared_ptr<Queue<RxMessageWrapper>>;
+#endif
 
 class ChannelListener
 {
@@ -94,13 +97,15 @@ private:
 class MyAmqpChannel
 {
 public:
-
-	MyAmqpChannel(const ChannelConfig& channel_config
-		, std::function<void(const std::string &)> error_callback
-		, const std::string& channel_name) :
-		channel_config_(channel_config)
-		, on_error_callback_(std::move(error_callback))
-		, channel_name_(channel_name)
+	MyAmqpChannel(const ChannelConfig &channel_config
+	              , AMQP::TcpConnection *tcp_connection
+	              , std::function<void(AMQP::TcpConnection *, const std::string &)> error_callback
+	              , std::function<void()> ready_callback
+	              , const std::string &channel_name) : channel_config_(channel_config)
+	                                                   , on_error_callback_(std::move(error_callback))
+	                                                   , ready_callback_(std::move(ready_callback))
+	                                                   , channel_name_(channel_name)
+	                                                   , tcp_connection_(tcp_connection)
 	{}
 	virtual ~MyAmqpChannel() = default;
 	virtual void deactivate() = 0;
@@ -112,17 +117,13 @@ protected:
 	 */
 	virtual void setupBaseTcpChannel()
 	{
-		std::lock_guard lock(tcp_channel_mutex_);
-		if (!tcp_channel_)
-		{
-			throw std::runtime_error(channel_name_ + ": TCP channel is not set up!");
-		}
+		tcp_channel_ = std::make_unique<AMQP::TcpChannel>(tcp_connection_);
 
 		// All channels need to handle errors
 		tcp_channel_->onError([this](const char *message)
-						  {
-							  on_error_callback_(channel_name_ + ": Channel error: " + std::string(message));
-						  });
+		{
+			on_error_callback_(tcp_connection_, channel_name_ + ": Channel error: " + std::string(message));
+		});
 
 		// All channels need to connect to an exchange
 		auto exchange_name = channel_config_.exchange_name;
@@ -134,11 +135,11 @@ protected:
 						{
 							LOG_DEBUG(channel_name_ << "(MyAmqpChannel) Exchange '" << exchange_name << "' declared successfully.");
 						})
-						.onError([this, exchange_name](const char *message)
+						.onError([this](const char *message)
 						{
 							if (on_error_callback_)
 							{
-								on_error_callback_(channel_name_ + "Exchange already exists: " + std::string(message));
+								on_error_callback_(tcp_connection_, channel_name_ + "Exchange already exists: " + std::string(message));
 							}
 						});
 		}
@@ -151,31 +152,41 @@ protected:
 		}
 	}
 
+	// Configuration of this channel - required for initialise
 	const ChannelConfig channel_config_;
 
 	// Handling the TCP Channel - not naturally thread safe so take care
 	std::unique_ptr<AMQP::TcpChannel> tcp_channel_;
-	std::mutex tcp_channel_mutex_;
 
 	// Whether a channel is active or not
 	std::atomic<ChannelState> channel_state_ {ChannelState::none};
-	std::condition_variable channel_active_cv_;
-	std::mutex channel_active_mutex_;
-	std::function<void(const std::string &)> on_error_callback_;
-	const std::string channel_name_;
-};
 
+	// Common function for handling errors related to channels or connections - all need to use the same function
+	std::function<void(AMQP::TcpConnection*, const std::string&)> on_error_callback_;
+
+	// Common function for handling when a channel becomes ready - allows us to do an initial processing of any queue data that may have been added before we were ready
+	std::function<void()> ready_callback_;
+
+	// Useful for identifying the channel that's acting
+	const std::string channel_name_;
+
+	// Required to pass in to the error function...
+	AMQP::TcpConnection* tcp_connection_;
+};
+#if 0
 class MyAmqpRxChannel : public MyAmqpChannel
 {
 public:
 	MyAmqpRxChannel(std::unique_ptr<AMQP::TcpChannel> tcp_channel
 					, const ChannelConfig &channel_config
-					, std::function<void(const std::string &)> error_callback
+					, AMQP::TcpConnection* tcp_connection
+					, std::function<void(AMQP::TcpConnection*, const std::string &)> error_callback
 					, const MyRxDataQueuePtr& queue
 					, const std::shared_ptr<ChannelListener>& listener
 					, const size_t num_received=0
 					, const size_t num_acknowledged_=0
 					) : MyAmqpChannel(channel_config
+									  , tcp_connection
 					                  , std::move(error_callback)
 					                  , "RX - " + channel_config.queue_name)
 	, num_received_(num_received)
@@ -211,7 +222,7 @@ private:
 		listener_->onChannelStateChange(channel_name_, state);
 	}
 
-	void initialise_(std::unique_ptr<AMQP::TcpChannel> tcp_channel)
+	void initialise()
 	{
 		setState_(ChannelState::initialising);
 
@@ -255,7 +266,7 @@ private:
                             if (on_error_callback_)
                             {
                             	setState_(ChannelState::error);
-                                on_error_callback_(channel_name_ + ": Channel queue Error: " + message);
+                                on_error_callback_(tcp_connection_, channel_name_ + ": Channel queue Error: " + message);
                             }
                         }
                     );
@@ -269,7 +280,7 @@ private:
                         if (on_error_callback_)
                         {
                             setState_(ChannelState::error);
-                            on_error_callback_(channel_name_ + ": Error binding queue to exchange: " + message);
+                            on_error_callback_(tcp_connection_, channel_name_ + ": Error binding queue to exchange: " + message);
                         }
                     });
 
@@ -290,7 +301,7 @@ private:
                 if (on_error_callback_)
                 {
                 	setState_(ChannelState::error);
-                    on_error_callback_(channel_name_ + ": Error setting QoS prefetch count: " + message);
+                    on_error_callback_(tcp_connection_, channel_name_ + ": Error setting QoS prefetch count: " + message);
                 }
             });
 
@@ -325,7 +336,7 @@ private:
                             if (on_error_callback_)
                             {
                             	setState_(ChannelState::error);
-                                on_error_callback_(channel_name_ + ": Error - unable to start consuming messages: " + message);
+                                on_error_callback_(tcp_connection_, channel_name_ + ": Error - unable to start consuming messages: " + message);
                             }
                         });
         }
@@ -360,6 +371,7 @@ private:
 	MyRxDataQueuePtr queue_;
 	std::shared_ptr<ChannelListener> listener_;
 };
+#endif
 
 /**
  * WARNING: The MyAmqpTxChannel currently has a thread per transmit which is inefficient if scaled to multiple channels. Needs to be
@@ -369,29 +381,31 @@ private:
 class MyAmqpTxChannel : public MyAmqpChannel
 {
 public:
-	MyAmqpTxChannel(std::unique_ptr<AMQP::TcpChannel> tcp_channel
+	MyAmqpTxChannel(AMQP::TcpConnection *tcp_connection
 	                , const ChannelConfig &channel_config
-	                , std::function<void(const std::string &)> error_callback
+	                , std::function<void(AMQP::TcpConnection *connection, const std::string &)> error_callback
+	                , std::function<void()> ready_callback
 	                , MyTxDataQueuePtr queue
-	                , const std::shared_ptr<ChannelListener>& listener
-	                , const size_t num_transmitted=0) : MyAmqpChannel(channel_config
-	                                                                  , std::move(error_callback)
-	                                                                  , "TX - " + channel_config.exchange_name)
-	                                                    , num_transmitted_(num_transmitted)
-	                                                    , queue_(std::move(queue))
-	                                                    , listener_(listener)
+	                , const std::shared_ptr<ChannelListener> &listener
+	                , const size_t num_transmitted = 0) : MyAmqpChannel(channel_config
+	                                                                    , tcp_connection
+	                                                                    , std::move(error_callback)
+	                                                                    , std::move(ready_callback)
+	                                                                    , "TX - " + channel_config.exchange_name)
+	                                                      , num_transmitted_(num_transmitted)
+	                                                      , queue_(std::move(queue))
+	                                                      , listener_(listener)
 	{
-		initialise_(std::move(tcp_channel));
+		initialise_();
 	}
 
 	~MyAmqpTxChannel()
 	{
-		deactivate_();
 	}
 
 	void deactivate() override
 	{
-		deactivate_();
+		LOG_DEBUG(channel_name_ << ": Deactivating channel. Nothing to do here yet!");
 	}
 
 	void sendData(size_t &current_batch_size)
@@ -419,13 +433,12 @@ public:
 
 		// Reduce scope of mutex locking
 		{
-			std::lock_guard lock(tcp_channel_mutex_);
 			if (!tcp_channel_->publish(channel_config_.exchange_name, channel_config_.routing_key, message->data(), message->size()))
 			{
 				std::ostringstream os;
 				os << "Failed to publish message " << message;
 				setState_(ChannelState::error);
-				on_error_callback_(os.str());
+				on_error_callback_(tcp_connection_, os.str());
 			}
 			else
 			{
@@ -444,7 +457,7 @@ private:
 		listener_->onChannelStateChange(channel_name_, state);
 	}
 
-	void initialise_(std::unique_ptr<AMQP::TcpChannel> tcp_channel)
+	void initialise_()
 	{
 		setState_(ChannelState::initialising);
 
@@ -461,7 +474,7 @@ private:
 			throw std::runtime_error(channel_name_ + ": Cannot create channel without a listener");
 		}
 
-		tcp_channel_ = std::move(tcp_channel);
+
 		MyAmqpChannel::setupBaseTcpChannel();
 
 		// We need to know when we are ready to send more data, and be able to handle acknowledgements
@@ -473,28 +486,15 @@ private:
 				LOG_DEBUG(channel_name_ << ": channel is now active.");
 				setState_(ChannelState::active);
 			}
-			// This occurs on the first time confirmSelect is setup
-			channel_active_cv_.notify_one();
+
+			// See if there is any data to send yet!
+			ready_callback_();
 		}).onError([this](const char *message)
 		{
 			setState_(ChannelState::error);
-			on_error_callback_(channel_name_ + ": Failed to confirm select: " + std::string(message));
+			on_error_callback_(tcp_connection_, channel_name_ + ": Failed to confirm select: " + std::string(message));
 		});
 	}
-
-	void deactivate_()
-	{
-		setState_(ChannelState::deactivating);
-		channel_active_cv_.notify_one();
-		if (transmit_thread_.joinable())
-		{
-			transmit_thread_.join();
-		}
-		setState_(ChannelState::inactive);
-
-		LOG_INFO(channel_name_ << ": has been deactivated");
-	}
-
 
 
 private:
@@ -505,9 +505,6 @@ private:
 
 	// Queue to pass data in for transmission
 	MyTxDataQueuePtr queue_;
-
-	// Separate thread dedicated to sending data - potentially we could have a single shared thread across all TX channels to reduce total number of threads used
-	std::jthread transmit_thread_;
 
 	// Receives all the event updates from this channel as the TCPChannel is not thread safe
 	std::shared_ptr<ChannelListener> listener_;

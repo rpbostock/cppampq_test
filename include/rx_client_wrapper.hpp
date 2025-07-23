@@ -1,7 +1,7 @@
 #pragma once
 
 #include "my_amqp_controller.hpp"
-
+#if 0
 class RxClientWrapper
 {
 public:
@@ -47,3 +47,4 @@ inline bool operator>=(const RxClientWrapper &lhs, const RxClientWrapper &rhs)
 {
 	return !(lhs < rhs);
 }
+#endif

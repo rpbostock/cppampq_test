@@ -187,10 +187,10 @@ bool TestAmqp::testForceReconnectNoChannel_(int num_repeats, int num_threads)
 	return true;
 }
 
-std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval, int& num_forced_reconnections)
+std::jthread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval, int& num_forced_reconnections)
 {
 	std::atomic<int> rc(0);
-	std::thread forceClose([&interval, &finish, &rc]() {
+	std::jthread forceClose([&interval, &finish, &rc, &num_forced_reconnections]() {
 		while (finish.load() == false)
 		{
 			std::this_thread::sleep_for(interval);
@@ -198,7 +198,8 @@ std::thread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std
 			rc = forceCloseConnections_();
 				if (rc == 0)
 			{
-				LOG_DEBUG("All connections closed.");
+				++num_forced_reconnections;
+				LOG_INFO("All connections closed. Forced disconnects: " << num_forced_reconnections);
 			}
 			else
 			{
@@ -255,7 +256,6 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages, const int num_cha
 	// Basic setup
 	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
 	controller.setMaxTransmitBatchSize(10000); // We're only interested in transmission so we can put this very high
-	controller.start();
 
 	std::vector<TxClientWrapper> transmitters;
 	for (auto i=0; i<num_channels; i++)
@@ -266,6 +266,7 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages, const int num_cha
 		const auto channel_listener = std::make_shared<rmq::ChannelListener>();
 		transmitters.emplace_back(controller.createTransmitChannel(config, channel_listener));
 	}
+	controller.start();
 
 	// Ensure we're up and running
 	auto start = std::chrono::high_resolution_clock::now();
@@ -296,6 +297,7 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages, const int num_cha
 	});
 
 	// Wait for them all to be sent
+	// std::this_thread::sleep_for(std::chrono::seconds(1000));
 	start = std::chrono::high_resolution_clock::now();
 	while ( !(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfTransmittedMessages() == num_messages; })
 		&& send_complete.load())
@@ -358,6 +360,7 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 			auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
 			queue->push(message_vec);
 		}
+		LOG_INFO("Completed sending " << num_messages << " messages");
 		send_complete.store(true);
 	});
 
@@ -375,13 +378,15 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
+	finish.store(true);
+	forceDisconnectThread.join();
+
 	GTEST_ASSERT_TRUE(queue->isEmpty());
 	GTEST_ASSERT_TRUE(send_complete.load());
 	GTEST_ASSERT_EQ(listener->getNumberOfTransmittedMessages(), num_messages);
-
-	finish.store(true);
-	forceDisconnectThread.join();
+	GTEST_ASSERT_EQ(controller.getNumReconnections(), num_force_disconnects);
 }
+#if 0
 
 TEST_F(TestAmqp, testReceiveChannel_short)
 {
@@ -699,3 +704,4 @@ void TestAmqp::testSingleTxMultipleRx_(const size_t num_messages, const size_t n
 
 	GTEST_ASSERT_TRUE(std::ranges::all_of(rx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfReceivedMessages() == num_messages;} ));
 }
+#endif

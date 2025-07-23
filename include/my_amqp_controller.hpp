@@ -1,30 +1,43 @@
 #pragma once
-#include <iostream>
 #include <memory>
 
 #include <atomic>
+#include <thread>
 #include <amqpcpp/address.h>
 #include <amqpcpp/libevent.h>
 #include "channel_config.hpp"
 
 #include "my_amqp_channel.hpp"
-#include "rx_client_wrapper.hpp"
 #include "tx_client_wrapper.hpp"
 
 namespace rmq
 {
 
+class EventsMap : public std::map<std::string, event*>
+{
+public:
+	void cleanup()
+	{
+		for (const auto& event : *this)
+		{
+			event_del(event.second);
+			event_free(event.second);
+		}
+		clear();
+	}
+};
+
 class MyLibEventHandler final : public AMQP::LibEventHandler
 {
 public:
-	explicit MyLibEventHandler(struct event_base *evbase, std::vector<event*> &events) : LibEventHandler(evbase), events_(events)
+	explicit MyLibEventHandler(struct event_base *evbase, EventsMap &events) : LibEventHandler(evbase), events_(events)
 	{
 
 	}
 
 	~MyLibEventHandler()
 	{
-		clearupEvents_();
+		events_.cleanup();
 	}
 
 	void onReady(AMQP::TcpConnection *connection) override
@@ -33,18 +46,23 @@ public:
 		is_ready_ = true;
 	}
 
+	void onError(AMQP::TcpConnection *connection, const std::string& message)
+	{
+		onError(connection, message.c_str());
+	}
+
 	void onError(AMQP::TcpConnection *connection, const char *message) override
 	{
 		LOG_ERROR("onError - connection error: " << message);
 		is_error_ = true;
-		clearupEvents_();
+		events_.cleanup();
 		connection->close(); // Suspect this may not be needed on an error, but just to be safe...
 	}
 
 	void onClosed(AMQP::TcpConnection *connection) override
 	{
 		LOG_DEBUG("onClosed - connection closed and clearing up events");
-		clearupEvents_();
+		events_.cleanup();
 	}
 
 	bool isError() const
@@ -58,39 +76,27 @@ public:
 	}
 
 private:
-	void clearupEvents_()
-	{
-		for (const auto& event : events_)
-		{
-			event_del(event);
-			event_free(event);
-		}
-		events_.clear();
-	}
+	MyLibEventHandler() = delete;
 
-
-	std::vector<event*> &events_;
+	EventsMap &events_;
 	std::atomic<bool> is_ready_ {false};
 	std::atomic<bool> is_error_ {false};
-
 };
 
 
 using ChannelListenerPtr = std::shared_ptr<ChannelListener>;
 using ChannelHandlerTxPtr = std::unique_ptr<MyAmqpTxChannel>;
-using ChannelHandlerRxPtr = std::unique_ptr<MyAmqpRxChannel>;
 template <typename MessageType, typename ChannelTypePtr>
 class MyAmqpChannelInfo
 {
 public:
-	explicit MyAmqpChannelInfo(ChannelTypePtr channel
-		, const ChannelListenerPtr &listener
+	MyAmqpChannelInfo( const ChannelListenerPtr &listener
 		, const std::shared_ptr<MessageType>& queue
 		, const ChannelConfig& config)
-		: channel_(std::move(channel))
+		: listener_(listener)
 		, queue_(queue)
 		, config_(config)
-		, listener_(listener)
+		, channel_(nullptr)
 	{}
 
 	void resetChannel()
@@ -124,34 +130,34 @@ public:
 		listener_ = listener;
 	}
 
-protected:
-	ChannelTypePtr channel_;
-	std::shared_ptr<MessageType> queue_;
-	ChannelConfig config_;
+private:
 	std::shared_ptr<ChannelListener> listener_;
+	std::shared_ptr<MessageType> queue_;
+	// ReSharper disable once CppDFANotInitializedField
+	const ChannelConfig config_;
+	ChannelTypePtr channel_;
 };
 
 
 class MyAmqpTxChannelInfo : public MyAmqpChannelInfo<MyTxDataQueue, ChannelHandlerTxPtr>
 {
 public:
-	explicit MyAmqpTxChannelInfo(ChannelHandlerTxPtr channel
-	                             , const ChannelListenerPtr &listener
+	MyAmqpTxChannelInfo(const ChannelListenerPtr &listener
 	                             , const std::shared_ptr<MyTxDataQueue> &queue
 	                             , const ChannelConfig &config) :
-		MyAmqpChannelInfo(std::move(channel), listener, queue, config)
+		MyAmqpChannelInfo(listener, queue, config)
 	{
 	}
 };
 
+#if 0
 class MyAmqpRxChannelInfo : public MyAmqpChannelInfo<MyRxDataQueue, ChannelHandlerRxPtr>
 {
 public:
-	explicit MyAmqpRxChannelInfo(ChannelHandlerRxPtr channel
-	                             , const ChannelListenerPtr &listener
+	explicit MyAmqpRxChannelInfo(const ChannelListenerPtr &listener
 	                             , const std::shared_ptr<MyRxDataQueue> &queue
 	                             , const ChannelConfig &config) :
-		MyAmqpChannelInfo(std::move(channel), listener, queue, config)
+		MyAmqpChannelInfo(listener, queue, config)
 	{
 	}
 
@@ -160,32 +166,28 @@ public:
 		channel_->acknowledge(ack);
 	}
 };
+#endif
 
 class MyAmqpController {
 public:
 	using TxChannelHandlerPtr = std::shared_ptr<MyAmqpTxChannel>;
-	explicit MyAmqpController(const std::string& address) :
-		address_(address)
-		, evbase_(nullptr)
+	MyAmqpController(const std::string &address) : address_(address)
+	                                                        , evbase_(nullptr)
+	                                                        , notification_pipe{-1, -1}
 	{
-
 	}
 
 	~MyAmqpController()
 	{
-		// std::cout << "MyAmqpController::~MyAmqpController()" << std::endl;
+		LOG_TRACE("MyAmqpController::~MyAmqpController()");
 		if (maintain_connection.load())
 		{
 			maintain_connection.store(false);
 			triggerClose();
 		}
 
-		// Close the connection - this should also stop the event handling loop when complete
-		// TODO Use a notification pipe to close this
-		// connection_->close();
-
-		maintain_connection_thread.join(); // TODO Probably don't need the flag above anymore
-		// std::cout << "MyAmqpController::~MyAmqpController() - done" << std::endl;
+		maintain_connection_thread.join();
+		LOG_TRACE("MyAmqpController::~MyAmqpController() - done");
 	}
 
 	TxClientWrapper createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
@@ -195,22 +197,19 @@ public:
 		{
 			throw std::runtime_error("Cannot accept nullptr listener");
 		}
+		if (maintain_connection.load())
+		{
+			throw std::runtime_error("Cannot create transmit channel while maintaining connection");
+		}
 
 		auto channel_name = config.exchange_name;
-		auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection_.get());
-		auto queue = std::make_shared<MyTxDataQueue>(1000, QueueOverflowPolicy::WAIT); // possibly pass this in as a parameter?
-		// TODO Need to change this so that the error callback is actually a close on the AmqpConnection. As this will always be single threaded, this should be thread safe
-		auto tx_channel = std::make_unique<MyAmqpTxChannel>(std::move(amqp_channel)
-			, config
-			, [&config, this](const std::string &error_message) { onChannelError(config.queue_name, error_message.c_str()); }
-			, queue
-			, listener);
-		transmit_functions_.emplace_back(std::bind(&MyAmqpTxChannel::sendData, tx_channel.get(), std::placeholders::_1));
-		tx_channel_wrappers_.emplace(channel_name, MyAmqpTxChannelInfo(std::move(tx_channel), listener, queue, config));
+		const auto queue = std::make_shared<MyTxDataQueue>(1000, QueueOverflowPolicy::WAIT); // possibly pass this in as a parameter?
+		tx_channel_wrappers_.emplace(channel_name, MyAmqpTxChannelInfo(listener, queue, config));
 
 		return TxClientWrapper(channel_name, listener, queue);
 	}
 
+#if 0
 	RxClientWrapper createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -233,7 +232,7 @@ public:
 		// Need a way to access bits in the future
 		return RxClientWrapper(channel_name, listener, queue, ack_fn);
 	}
-	
+#endif
 	bool isConnectionReady() const
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
@@ -271,11 +270,15 @@ public:
 
 	void run()
 	{
+		// Always start off trying to maintain the connection
+		maintain_connection.store(true);
+
 		while (maintain_connection.load())
 		{
 			establishAmqpConnection_();
 
 			// This will only return once all registered event sources (controller and channels) have finished
+			assert(evbase_!=nullptr);
 			event_base_dispatch(evbase_);
 
 			cleanUpAmqpConnection_();
@@ -308,22 +311,7 @@ public:
 				handler_ = std::make_unique<MyLibEventHandler>(evbase_);
 				connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
 
-				// Reset the transmitters
-				for (auto& channel_wrapper : tx_channel_wrappers_)
-				{
-					// Create a new channel and connect it to the new connection
-					auto amqp_channel = std::make_unique<AMQP::TcpChannel>(connection_.get());
-					auto tx_channel = std::make_unique<MyAmqpTxChannel>(
-						std::move(amqp_channel)
-						, channel_wrapper.second.config()
-						, [&channel_wrapper, this](const std::string &error_message) { onChannelError(channel_wrapper.first, error_message.c_str()); }
-						, channel_wrapper.second.queue()
-						, channel_wrapper.second.listener()
-						, channel_wrapper.second.listener()->getNumberOfTransmittedMessages()
-						);
-					transmit_functions_.emplace_back(std::bind(&MyAmqpTxChannel::sendData, tx_channel.get(), std::placeholders::_1));
-					channel_wrapper.second.setChannel(std::move(tx_channel));
-				}
+
 				cmd_transmit_active.store(true);
 
 				// Reset the receivers TODO
@@ -362,33 +350,6 @@ public:
 		return it->second.queue();
 	}
 
-	// TODO do we still need this at all?
-	MyRxDataQueuePtr getRxQueue(const std::string& channel_name)
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		const auto it = rx_channel_wrappers_.find(channel_name);
-		if (it == rx_channel_wrappers_.end())
-		{
-			return nullptr;
-		}
-		return it->second.queue();
-	}
-
-	// TODO do we still need this at all?
-	std::function<void(const IMessageAck& ack)> getAckFunction(const std::string& channel_name)
-	{
-		std::lock_guard<std::mutex> lock(mutex_);
-		const auto it = rx_channel_wrappers_.find(channel_name);
-		if (it == rx_channel_wrappers_.end())
-		{
-			return nullptr;
-		}
-		const auto &info = it->second;
-		return ([&info](const IMessageAck& ack)
-		{
-			info.acknowledge(ack);
-		});
-	}
 
 	// Deprecated
 #if 0
@@ -411,7 +372,7 @@ public:
 		else { throw std::runtime_error("Max transmit batch size must be >= 10"); }
 	}
 
-	void triggerClose()
+	void triggerClose() const
 	{
 		// TODO Need a check to sanity check that we haven't already requested a close
 		// TODO Change this to be a lock on the notification queue later
@@ -429,14 +390,29 @@ public:
 	}
 
 private:
-
+	/**
+	 * We only get to this stage when the event thread has already returned. This means:
+	 * - TCPConnection has closed
+	 * - Any active transmits have already been completed
+	 * - The receive side of the notification pipe isn't being monitored
+	 */
 	void cleanUpAmqpConnection_()
 	{
-		for (const auto& event : events_)
+		if (nullptr == evbase_)
 		{
-			event_free(event);
+			throw std::runtime_error("cleanUpAmqpConnection_ called before establishAmqpConnection_");
 		}
-		events_.clear();
+
+		// Anything to do with TX channels here!
+		notification_pipe_transmitter_.reset(); // We don't want to accidentally try and send any data across
+		for (auto& tx_channel_wrapper : tx_channel_wrappers_)
+		{
+			tx_channel_wrapper.second.resetChannel();
+			tx_channel_wrapper.second.queue()->setupNotificationPipe('X', nullptr);
+		}
+
+
+		events_.cleanup(); // This should already have occurred otherwise the event loop wouldn't exit, but shouldn't harm anything
 		evutil_closesocket(notification_pipe[0]);
 		evutil_closesocket(notification_pipe[1]);
 
@@ -449,24 +425,52 @@ private:
 	{
 		// Core AMQP connection bits
 		evbase_ = event_base_new();
+		if (nullptr == evbase_)
+		{
+			throw std::runtime_error("Failed to create event base");
+		}
+
 		handler_ = std::make_unique<MyLibEventHandler>(evbase_, events_);
 		connection_ = std::make_unique<AMQP::TcpConnection>(handler_.get(), AMQP::Address(address_));
 
 		// Create a notification pipe to talk to libevent
-		if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, notification_pipe) < 0) {
+		if (evutil_socketpair(AF_UNIX, SOCK_STREAM, 0, notification_pipe) < 0)
+		{
 			throw std::runtime_error("Failed to create notification pipe");
 		}
 		evutil_make_socket_nonblocking(notification_pipe[0]);
 		evutil_make_socket_nonblocking(notification_pipe[1]);
+		notification_pipe_transmitter_ = std::make_shared<NotificationPipeTransmitter>(notification_pipe[1]);
 
 		// Create event for the read end of the pipe - you write to notification_pipe[1]
 		auto notification_event = event_new(evbase_, notification_pipe[0],
 											EV_READ | EV_PERSIST, &MyAmqpController::notification_callback_, this);
 		event_add(notification_event, nullptr);
-		events_.push_back(notification_event);
+		events_.emplace(pipe_event_name, notification_event);
+
+		// Any transmit channels
+		for (auto& channel_wrapper : tx_channel_wrappers_)
+		{
+			LOG_INFO("Creating TX channel " << channel_wrapper.first);
+			auto tx_channel = std::make_unique<MyAmqpTxChannel>(
+			// Create a new channel and connect it to the new connection
+				connection_.get()
+				, channel_wrapper.second.config()
+				, [handler = handler_.get()](AMQP::TcpConnection* conn, const std::string& error) { handler->onError(conn, error); }
+				, [this]() { this->handleTransmitThreads_(); }
+				, channel_wrapper.second.queue()
+				, channel_wrapper.second.listener()
+				, channel_wrapper.second.listener()->getNumberOfTransmittedMessages()
+				);
+
+			// Connect the queue to the notification pipe
+			channel_wrapper.second.queue()->setupNotificationPipe('t', notification_pipe_transmitter_);
+			transmit_functions_.emplace_back(std::bind(&MyAmqpTxChannel::sendData, tx_channel.get(), std::placeholders::_1));
+			channel_wrapper.second.setChannel(std::move(tx_channel));
+		}
 
 		++num_connections;
-		LOG_INFO("Finished connecting to " << address_);
+		LOG_INFO("Finished connecting to " << address_ << ". Number of reconnections: " << num_connections - 1);
 	}
 
 	static void notification_callback_(evutil_socket_t fd, short events, void* arg) {
@@ -481,9 +485,10 @@ private:
 		MyAmqpController* self = static_cast<MyAmqpController*>(arg);
 
 		// Clear the pipe - we've been notified that there's data, so there probably is
-		char buf[1024];
+		char buf[10000];
 		if (int num_rx = recv(fd, buf, sizeof(buf), 0); num_rx > 0)
 		{
+			LOG_DEBUG("Received " << num_rx << " bytes from notification pipe");
 			// Hard close request = 'C'
 			if (std::ranges::find(buf, buf + num_rx, 'C') != buf + num_rx)
 			{
@@ -498,6 +503,10 @@ private:
 
 			// Else
 			// - Batch transmits
+			if (std::ranges::find(buf, buf + num_rx, 't') != buf + num_rx)
+			{
+				self->handleTransmitThreads_();
+			}
 		}
 
 	}
@@ -511,8 +520,8 @@ private:
 		// TODO - consider doing this on connection->close()? That should get rid of all the duplicate code...
 		for (const auto& event : events_)
 		{
-			event_del(event);
-			event_free(event);
+			event_del(event.second);
+			event_free(event.second);
 		}
 		events_.clear();
 
@@ -520,63 +529,65 @@ private:
 		connection_->close();
 	}
 
-	// TODO This will become an event called on the event queue based on a trigger - either from a new timer event or the notification pipe
-	void handleTransmitThreads()
+
+	void handleTransmitThreads_()
 	{
 		// Current number of messages transmitted in a loop on the thread (too many messages at once can hog the CPU and starve other threads)
 		size_t current_batch_size_ = 0;
-
-		while (!transmit_exit.load())
+		auto old_batch_size = 1;
+		while (current_batch_size_ <= max_tx_batch_size_ && current_batch_size_ != old_batch_size)
 		{
-			if (cmd_transmit_active.load())
+			old_batch_size = current_batch_size_;
+			for (auto& fn : transmit_functions_)
 			{
-				const auto old_batch_size = current_batch_size_;
-				for (auto& fn : transmit_functions_)
-				{
-					if (cmd_transmit_active.load())
-					{
-						fn(current_batch_size_);
-					}
-				}
-				if (old_batch_size == current_batch_size_ || current_batch_size_ > max_tx_batch_size_)
-				{
-					current_batch_size_ = 0;
-					std::this_thread::sleep_for(std::chrono::milliseconds(10));
-				}
+				// TODO Add a check for an error here between each call
+				fn(current_batch_size_);
 			}
-			else
-			{
-				std::this_thread::sleep_for(std::chrono::milliseconds(10));
-			}
+		}
+		if (current_batch_size_ == old_batch_size)
+		{
+			LOG_TRACE("Finished transmit - sent " << current_batch_size_ << " messages");
+			return;
+		}
+		if (current_batch_size_ > max_tx_batch_size_)
+		{
+			LOG_DEBUG("Too many messages in queue. Transmitted " << current_batch_size_ << ". Scheduling another transmit.");
 
+			// Need to use an event to trigger this function again. This variant automatically cleans up the related event
+			struct timeval tv = {0, 10000};  // Immediate timeout
+			event_base_once(evbase_, -1, EV_TIMEOUT,
+				[](evutil_socket_t fd, short what, void* arg) {
+					auto self = static_cast<MyAmqpController*>(arg);
+					LOG_DEBUG("Processing handleTransmitThreads_ from callback");
+					self->handleTransmitThreads_();
+				},
+				this, &tv);
 		}
 	}
 
 	// Main connection
 	std::string address_;
+	// cppcheck-suppress uninitMemberVar
 	struct event_base *evbase_;
 	std::unique_ptr<MyLibEventHandler> handler_;
 	std::unique_ptr<AMQP::TcpConnection> connection_;
 
 	// Notification pipe setup
 	evutil_socket_t notification_pipe[2];
-	std::vector<event*> events_;
+	EventsMap events_; // TODO Do we need this here - better in the MyLibEventHandler if possible
+	const std::string pipe_event_name = "notification_pipe";
+	const std::string transmit_event = "notification_pipe";
+	std::shared_ptr<NotificationPipeTransmitter> notification_pipe_transmitter_;
 
 	std::thread maintain_connection_thread;
 	// This indicates whether we should be trying to maintain connections or not
-	std::atomic<bool> maintain_connection {true};
+	std::atomic<bool> maintain_connection {false};
 	std::atomic<int> num_connections {0};
 
 	// Channel handling
 	std::unordered_map<std::string, MyAmqpTxChannelInfo> tx_channel_wrappers_;
-	std::unordered_map<std::string, MyAmqpRxChannelInfo> rx_channel_wrappers_;
+	// std::unordered_map<std::string, MyAmqpRxChannelInfo> rx_channel_wrappers_;
 	std::vector<std::function<void( size_t &batch_size)>> transmit_functions_ ;
-
-	// Transmitting on multiple channels
-	std::jthread transmitter_thread;
-	std::atomic<bool> cmd_transmit_active {false};
-	std::atomic<bool> res_transmit_active {false};
-	std::atomic<bool> transmit_exit {true};
 
 	// used to prevent the transmit side hogging all the processing time
 	size_t max_tx_batch_size_ = 500;

@@ -24,6 +24,7 @@ template<typename Typ>
 class Queue
 {
 public:
+	virtual ~Queue() = default;
 	explicit Queue(size_t max_size, QueueOverflowPolicy default_overflow_policy = QueueOverflowPolicy::WAIT, const std::string& name = "queue")
 		:default_overflow_policy_(default_overflow_policy)
 		,max_size_(max_size)
@@ -56,12 +57,12 @@ public:
 		return true;
 	}
 
-	void push(const Typ& obj)
+	virtual void push(const Typ& obj)
 	{
 		IGNORE_RESULT(push(obj, default_overflow_policy_));
 	}
 
-	void push(Typ&& obj)
+	virtual void push(Typ&& obj)
 	{
 		IGNORE_RESULT(push(std::move(obj), default_overflow_policy_));
 	}
