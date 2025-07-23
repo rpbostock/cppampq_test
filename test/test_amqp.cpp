@@ -470,7 +470,7 @@ void TestAmqp::testReceiveChannelAsync_(const size_t num_messages)
 				rx_wrapper.acknowledge(message.getAck());
 				if (received_messages%10000 == 0)
 				{
-					LOG_INFO("Received message " << received_messages);
+					LOG_INFO("Received and acknowledged message " << received_messages << ", ack queue has " << rx_wrapper.getAckQueue()->size() << " messages");
 				}
 			}
 			else

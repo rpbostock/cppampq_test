@@ -235,7 +235,7 @@ public:
 		}
 		else
 		{
-			LOG_TRACE(channel_name_  << ": ACKed - " << num_acknowledged_ << " : Message " << message.getDeliveryTag());
+			LOG_DEBUG(channel_name_  << ": ACKed - " << num_acknowledged_ << " : Message " << message.getDeliveryTag());
 			ack_queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
 			listener_->onNumberOfAcknowledgedMessages(channel_name_, ++num_acknowledged_);
 			++current_batch_size;
@@ -340,7 +340,7 @@ private:
             tcp_channel_->consume(channel_config_.queue_name)
                         .onReceived([this](const AMQP::Message &message, uint64_t deliveryTag, bool redelivered)
                         {
-                        	LOG_DEBUG(channel_name_ << ": Received message with delivery tag " << deliveryTag);
+                        	LOG_TRACE(channel_name_ << ": Received message with delivery tag " << deliveryTag);
                         	RxMessageWrapper wrapper;
                             wrapper.getMessage() = std::make_shared<std::vector<char>>(message.bodySize());
 	                        std::copy_n(message.body(), message.bodySize(),

@@ -15,6 +15,7 @@ public:
 	std::string getChannelName() const { return channel_name_; }
 	std::shared_ptr<rmq::ChannelListener> getListener() const  { return listener_; }
 	rmq::MyRxDataQueuePtr getQueue() const { return data_queue_; }
+	rmq::MyRxAckQueuePtr getAckQueue() const { return ack_queue_; }
 	void acknowledge(const rmq::IMessageAck& ack) const { ack_queue_->push(ack); }
 
 	// Declare the operators as friends but define them outside
