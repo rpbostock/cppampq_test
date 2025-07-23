@@ -326,8 +326,16 @@ std::chrono::seconds TestAmqp::getReceiveTimeout_(const size_t num_messages)
 
 TEST_F(TestAmqp, testReconnectionTxChannel_short)
 {
-	GTEST_LOG_(INFO) << "Test that we can send 100k messages successfully to an exchange - no feedback at this point";
-	testTransmitChannelWithReconnect_(1000000);
+	constexpr size_t num_messages = 1000000;
+	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully to an exchange under reconnect conditions - no feedback at this point";
+	testTransmitChannelWithReconnect_(num_messages);
+}
+
+TEST_F(TestAmqp, testReconnectionTxChannel_long)
+{
+	constexpr size_t num_messages = 10000000;
+	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully to an exchange under reconnect conditions - no feedback at this point";
+	testTransmitChannelWithReconnect_(num_messages);
 }
 
 void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
@@ -360,14 +368,14 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 			auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
 			queue->push(message_vec);
 		}
-		LOG_INFO("Completed sending " << num_messages << " messages");
+		LOG_INFO("Completed adding " << num_messages << " messages");
 		send_complete.store(true);
 	});
 
 	std::atomic<bool> finish(false);
-	auto interval = std::chrono::milliseconds(5000);
-	int num_force_disconnects = 0;
-	auto forceDisconnectThread = forceCloseConnections(finish, interval, num_force_disconnects);
+	auto interval = std::chrono::milliseconds(20000);
+	int num_forced_reconnections = 0;
+	auto forceDisconnectThread = forceCloseConnections(finish, interval, num_forced_reconnections);
 
 	// Wait for them all to be sent
 	start = std::chrono::high_resolution_clock::now();
@@ -384,8 +392,13 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 	GTEST_ASSERT_TRUE(queue->isEmpty());
 	GTEST_ASSERT_TRUE(send_complete.load());
 	GTEST_ASSERT_EQ(listener->getNumberOfTransmittedMessages(), num_messages);
-	GTEST_ASSERT_EQ(controller.getNumReconnections(), num_force_disconnects);
+
+	// TODO We may have to consider not using this as a check. Under load I've seen that a connection close request gets refused and the connection isn't actually broken.
+	LOG_DEBUG("Number of forced disconnects: " << num_forced_reconnections);
+	GTEST_ASSERT_LE(abs(controller.getNumReconnections() - num_forced_reconnections), 1) << "Not all threads within 1 reconnections. Expected reconnections between " << num_forced_reconnections -1 << " and " << num_forced_reconnections + 1
+			<< " but got " << controller.getNumReconnections();
 }
+
 #if 0
 
 TEST_F(TestAmqp, testReceiveChannel_short)

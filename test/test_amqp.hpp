@@ -87,6 +87,7 @@ private:
 
 
 	FRIEND_TEST(TestAmqp, testReconnectionTxChannel_short);
+	FRIEND_TEST(TestAmqp, testReconnectionTxChannel_long);
 	static void testTransmitChannelWithReconnect_(const size_t num_messages);
 
 	// Verification of receive items

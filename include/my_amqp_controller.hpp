@@ -440,7 +440,7 @@ private:
 		}
 		evutil_make_socket_nonblocking(notification_pipe[0]);
 		evutil_make_socket_nonblocking(notification_pipe[1]);
-		notification_pipe_transmitter_ = std::make_shared<NotificationPipeTransmitter>(notification_pipe[1]);
+		notification_pipe_transmitter_ = std::make_shared<NotificationPipeTransmitter>(notification_pipe[1], is_pipe_processed_);
 
 		// Create event for the read end of the pipe - you write to notification_pipe[1]
 		auto notification_event = event_new(evbase_, notification_pipe[0],
@@ -488,6 +488,7 @@ private:
 		char buf[10000];
 		if (int num_rx = recv(fd, buf, sizeof(buf), 0); num_rx > 0)
 		{
+			self->is_pipe_processed_.store(true);
 			LOG_DEBUG("Received " << num_rx << " bytes from notification pipe");
 			// Hard close request = 'C'
 			if (std::ranges::find(buf, buf + num_rx, 'C') != buf + num_rx)
@@ -554,7 +555,7 @@ private:
 			LOG_DEBUG("Too many messages in queue. Transmitted " << current_batch_size_ << ". Scheduling another transmit.");
 
 			// Need to use an event to trigger this function again. This variant automatically cleans up the related event
-			struct timeval tv = {0, 10000};  // Immediate timeout
+			struct timeval tv = {0, 10000};  // Timeout has not yet been tuned. We need enough to free up other threads, but as little as possible not to significantly impact the tx rate
 			event_base_once(evbase_, -1, EV_TIMEOUT,
 				[](evutil_socket_t fd, short what, void* arg) {
 					auto self = static_cast<MyAmqpController*>(arg);
@@ -577,6 +578,7 @@ private:
 	EventsMap events_; // TODO Do we need this here - better in the MyLibEventHandler if possible
 	const std::string pipe_event_name = "notification_pipe";
 	const std::string transmit_event = "notification_pipe";
+	std::atomic<bool> is_pipe_processed_ {true}; // Flag indicating whether new data has been added
 	std::shared_ptr<NotificationPipeTransmitter> notification_pipe_transmitter_;
 
 	std::thread maintain_connection_thread;

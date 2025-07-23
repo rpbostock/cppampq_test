@@ -8,28 +8,43 @@
 class NotificationPipeTransmitter
 {
 public:
-	explicit NotificationPipeTransmitter(evutil_socket_t notification_pipe) : notification_pipe_(notification_pipe) {}
+	explicit NotificationPipeTransmitter(evutil_socket_t notification_pipe, std::atomic<bool>& is_processed) : notification_pipe_(notification_pipe), is_processed_(is_processed) {}
 
 	bool notify(const char cmd)
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
+
+		// To prevent the buffer being overloaded when we're transmitting a lot we need a mechanism of throttling what is sent
+		if (is_processed_.load())
+		{
+			chars_processing_.clear();
+			is_processed_.store(false);
+		}
+		else
+		{
+			if (chars_processing_.find(cmd) != chars_processing_.end())
+			{
+				LOG_TRACE("Command already in the processing queue");
+				return false;
+			}
+		}
+
 		if (const int num_tx = send(notification_pipe_, &cmd, 1, 0); num_tx > 0)
 		{
 			LOG_DEBUG("Sent command: " << cmd );
-			last_notification_sent_ = std::chrono::high_resolution_clock::now();
-			last_notification_cmd_ = cmd;
+			chars_processing_.insert(cmd);
 			return true;
 		}
 		else
 		{
-			// This regularly occurs when we have a very fast rate of data to handle and the notification queue becomes full
-			LOG_TRACE("Failed to send command to the notification pipe");
+			// This should not happen now that we have throttling in place
+			LOG_WARN("Failed to send command to the notification pipe");
 			return false;
 		}
 	}
 private:
-	std::chrono::high_resolution_clock::time_point last_notification_sent_ {std::chrono::high_resolution_clock::now()};
-	char last_notification_cmd_ {0x00};
+	std::atomic<bool>& is_processed_;
+	std::set<char> chars_processing_;
 	evutil_socket_t notification_pipe_ {-1};
 	std::mutex mutex_;
 };
@@ -61,14 +76,14 @@ public:
 
 	void push(const Typ& obj) override
 	{
-		LOG_DEBUG("Pushing object to queue: " << obj);
+		LOG_TRACE("Pushing object to queue: " << obj);
 		Queue<Typ>::push(obj);
 		notify();
 	}
 
 	void push(Typ&& obj) override
 	{
-		LOG_DEBUG("Pushing object to queue: " << obj);
+		LOG_TRACE("Pushing object to queue: " << obj);
 		Queue<Typ>::push(std::move(obj));
 		notify();
 	}
