@@ -172,12 +172,12 @@ bool TestAmqp::testForceReconnectNoChannel_(int num_repeats, int num_threads)
 		forceDisconnectThread.join();
 
 		LOG_DEBUG("Number of forced disconnects: " << num_forced_reconnections);
-		if (std::ranges::any_of(thread_wrappers, [&num_forced_reconnections](const auto &wrapper) { return abs(wrapper.num_reconnections - num_forced_reconnections) <= 1; }))
+		if (std::ranges::any_of(thread_wrappers, [&num_forced_reconnections](const auto &wrapper) { return abs(wrapper.num_reconnections - num_forced_reconnections) > 1; }))
 		{
-			LOG_DEBUG("Not all threads had the same number of reconnections on repeat: " << i << ". Expected " << num_forced_reconnections);
-			for (auto &wrapper : thread_wrappers)
+			LOG_INFO("Not all threads within 1 reconnections on repeat: " << i << ". Expected reconnections between " << num_forced_reconnections -1 << " and " << num_forced_reconnections + 1);
+			for (auto &[thread, num_reconnections] : thread_wrappers)
 			{
-				LOG_DEBUG("Wrapper " << wrapper.num_reconnections << " on repeat " << i);
+				LOG_INFO("Wrapper reconnections " << num_reconnections << " on repeat " << i);
 			}
 
 			return false;
