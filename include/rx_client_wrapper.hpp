@@ -1,21 +1,21 @@
 #pragma once
 
 #include "my_amqp_controller.hpp"
-#if 0
+
 class RxClientWrapper
 {
 public:
 	explicit RxClientWrapper(const std::string &channel_name
 		, const std::shared_ptr<rmq::ChannelListener> &listener
-		, const rmq::MyRxDataQueuePtr& queue
-		, const std::function<void(const rmq::IMessageAck& ack)> &ack_fn) :
-	channel_name_(channel_name), listener_(listener), queue_(queue), acknowledge_fn_(ack_fn)
+		, const rmq::MyRxDataQueuePtr& data_queue
+		, const rmq::MyRxAckQueuePtr& ack_queue) :
+	channel_name_(channel_name), listener_(listener), data_queue_(data_queue), ack_queue_(ack_queue)
 	{}
 
 	std::string getChannelName() const { return channel_name_; }
 	std::shared_ptr<rmq::ChannelListener> getListener() const  { return listener_; }
-	rmq::MyRxDataQueuePtr getQueue() const { return queue_; }
-	void acknowledge(const rmq::IMessageAck& ack) const { acknowledge_fn_(ack); }
+	rmq::MyRxDataQueuePtr getQueue() const { return data_queue_; }
+	void acknowledge(const rmq::IMessageAck& ack) const { ack_queue_->push(ack); }
 
 	// Declare the operators as friends but define them outside
 	friend bool operator<(const RxClientWrapper& lhs, const RxClientWrapper& rhs);
@@ -26,8 +26,8 @@ public:
 private:
 	std::string channel_name_;
 	std::shared_ptr<rmq::ChannelListener> listener_;
-	rmq::MyRxDataQueuePtr queue_;
-	std::function<void(const rmq::IMessageAck& ack)> acknowledge_fn_;
+	rmq::MyRxDataQueuePtr data_queue_;
+	rmq::MyRxAckQueuePtr ack_queue_;
 };
 
 
@@ -47,4 +47,3 @@ inline bool operator>=(const RxClientWrapper &lhs, const RxClientWrapper &rhs)
 {
 	return !(lhs < rhs);
 }
-#endif

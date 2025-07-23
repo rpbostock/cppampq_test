@@ -399,7 +399,6 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 			<< " but got " << controller.getNumReconnections();
 }
 
-#if 0
 
 TEST_F(TestAmqp, testReceiveChannel_short)
 {
@@ -422,7 +421,7 @@ void TestAmqp::testReceiveChannelAsync_(const size_t num_messages)
 	rmq::ChannelConfig config {"testReceiveChannelAsync_exchange"
 		, "testReceiveChannelAsync_queue"
 		, "testReceiveChannelAsync_routing"};
-	config.qos_prefetch_count = 200;
+	config.qos_prefetch_count = 0;
 	auto rx_wrapper = controller.createReceiveChannel(config);
 	auto tx_wrapper = controller.createTransmitChannel(config);
 
@@ -717,4 +716,3 @@ void TestAmqp::testSingleTxMultipleRx_(const size_t num_messages, const size_t n
 
 	GTEST_ASSERT_TRUE(std::ranges::all_of(rx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfReceivedMessages() == num_messages;} ));
 }
-#endif

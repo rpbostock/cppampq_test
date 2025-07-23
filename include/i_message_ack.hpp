@@ -1,5 +1,6 @@
 #pragma once
 
+#include <ostream>
 #include <string>
 
 namespace rmq
@@ -21,6 +22,14 @@ public:
     bool isRedelivered() const { return redelivered_; }
     const std::string &getRoutingKey() const { return routing_key_; }
     const std::string &getExchange() const { return exchange_; }
+
+    friend std::ostream & operator<<(std::ostream &os, const IMessageAck &obj)
+    {
+        return os
+               << "delivery_tag_: " << obj.delivery_tag_
+               << " routing_key_: " << obj.routing_key_
+               << " exchange_: " << obj.exchange_;
+    }
 
 private:
     uint64_t delivery_tag_ = 0;

@@ -10,12 +10,12 @@ enum class ChannelState { none, initialising, active, deactivating, inactive, er
 using MyTxDataQueue = PipeNotificationQueue<std::shared_ptr<std::vector<char>>>;
 using MyTxDataQueuePtr = std::shared_ptr<MyTxDataQueue>;
 
-#if 0
 class RxMessageWrapper : public MessageWrapper<std::shared_ptr<std::vector<char>>>
 {};
 using MyRxDataQueue = Queue<RxMessageWrapper>;
-using MyRxDataQueuePtr = std::shared_ptr<Queue<RxMessageWrapper>>;
-#endif
+using MyRxAckQueue = PipeNotificationQueue<IMessageAck>;
+using MyRxDataQueuePtr = std::shared_ptr<MyRxDataQueue>;
+using MyRxAckQueuePtr = std::shared_ptr<MyRxAckQueue>;
 
 class ChannelListener
 {
@@ -152,10 +152,10 @@ protected:
 		}
 	}
 
-	// Configuration of this channel - required for initialise
+	// Configuration of this channel - required to initialise the channel
 	const ChannelConfig channel_config_;
 
-	// Handling the TCP Channel - not naturally thread safe so take care
+	// Handling the TCP Channel - not naturally thread safe so only use on the event thread
 	std::unique_ptr<AMQP::TcpChannel> tcp_channel_;
 
 	// Whether a channel is active or not
@@ -164,7 +164,7 @@ protected:
 	// Common function for handling errors related to channels or connections - all need to use the same function
 	std::function<void(AMQP::TcpConnection*, const std::string&)> on_error_callback_;
 
-	// Common function for handling when a channel becomes ready - allows us to do an initial processing of any queue data that may have been added before we were ready
+	// Common function for handling when a channel becomes ready - allows us to do initial processing of any queue data that may have been added before we were ready
 	std::function<void()> ready_callback_;
 
 	// Useful for identifying the channel that's acting
@@ -173,28 +173,31 @@ protected:
 	// Required to pass in to the error function...
 	AMQP::TcpConnection* tcp_connection_;
 };
-#if 0
+
 class MyAmqpRxChannel : public MyAmqpChannel
 {
 public:
-	MyAmqpRxChannel(std::unique_ptr<AMQP::TcpChannel> tcp_channel
-					, const ChannelConfig &channel_config
-					, AMQP::TcpConnection* tcp_connection
-					, std::function<void(AMQP::TcpConnection*, const std::string &)> error_callback
-					, const MyRxDataQueuePtr& queue
-					, const std::shared_ptr<ChannelListener>& listener
-					, const size_t num_received=0
-					, const size_t num_acknowledged_=0
-					) : MyAmqpChannel(channel_config
-									  , tcp_connection
-					                  , std::move(error_callback)
-					                  , "RX - " + channel_config.queue_name)
-	, num_received_(num_received)
-	, num_acknowledged_(num_acknowledged_)
-	, queue_(queue)
-	, listener_(listener)
+	MyAmqpRxChannel(AMQP::TcpConnection *tcp_connection
+	                , const ChannelConfig &channel_config
+	                , std::function<void(AMQP::TcpConnection *, const std::string &)> error_callback
+	                , std::function<void()> ready_callback
+	                , const MyRxDataQueuePtr &data_queue
+	                , const MyRxAckQueuePtr &ack_queue
+	                , const std::shared_ptr<ChannelListener> &listener
+	                , const size_t num_received = 0
+	                , const size_t num_acknowledged_ = 0
+	) : MyAmqpChannel(channel_config
+	                  , tcp_connection
+	                  , std::move(error_callback)
+	                  , std::move(ready_callback)
+	                  , "RX - " + channel_config.queue_name)
+	    , num_received_(num_received)
+	    , num_acknowledged_(num_acknowledged_)
+	    , data_queue_(data_queue)
+	    , ack_queue_(ack_queue)
+	    , listener_(listener)
 	{
-		initialise_(std::move(tcp_channel));
+		initialise_();
 	}
 
 	~MyAmqpRxChannel()
@@ -204,14 +207,39 @@ public:
 
 	void deactivate() override
 	{
+		LOG_DEBUG(channel_name_ << ": Deactivating channel. Nothing to do here yet!");
 		deactivate_();
 	}
 
-	void acknowledge(const IMessageAck& ack)
+	void sendAck(size_t &current_batch_size)
 	{
-		LOG_DEBUG(channel_name_ << "Sending acknowledgement for delivery tag " << ack.getDeliveryTag());
-		tcp_channel_->ack(ack.getDeliveryTag());
-		listener_->onNumberOfAcknowledgedMessages(channel_name_, ++num_acknowledged_);
+		if (channel_state_.load() != ChannelState::active)
+		{
+			return;
+		}
+
+		// Check if there's anything to send
+		if (ack_queue_->isEmpty() )
+		{
+			return;
+		}
+
+		// Get a copy of a message on the queue in case there's any issue sending it
+		const auto message = ack_queue_->peek();
+		if (!tcp_channel_->ack(message.getDeliveryTag()))
+		{
+			std::ostringstream os;
+			os << "Failed to publish acknowledgement " << message.getConsumerTag();
+			setState_(ChannelState::error);
+			on_error_callback_(tcp_connection_, os.str());
+		}
+		else
+		{
+			LOG_TRACE(channel_name_  << ": ACKed - " << num_acknowledged_ << " : Message " << message.getDeliveryTag());
+			ack_queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
+			listener_->onNumberOfAcknowledgedMessages(channel_name_, ++num_acknowledged_);
+			++current_batch_size;
+		}
 	}
 
 private:
@@ -222,7 +250,7 @@ private:
 		listener_->onChannelStateChange(channel_name_, state);
 	}
 
-	void initialise()
+	void initialise_()
 	{
 		setState_(ChannelState::initialising);
 
@@ -230,9 +258,13 @@ private:
 		{
 			throw std::runtime_error(channel_name_ + ": Cannot create channel without a listener");
 		}
-		if (!queue_)
+		if (!data_queue_)
 		{
 			throw std::runtime_error(channel_name_ + ": Cannot create channel without a queue");
+		}
+		if (!ack_queue_)
+		{
+			throw std::runtime_error(channel_name_ + ": Cannot create channel without an ack queue");
 		}
 		if (channel_config_.exchange_name.empty())
 		{
@@ -247,10 +279,10 @@ private:
 			LOG_ERROR(channel_name_ << ": Expected a routing key to be provided");
 		}
 
-		tcp_channel_ = std::move(tcp_channel);
+		// Create the TCPChannel and generic bits
 		MyAmqpChannel::setupBaseTcpChannel();
 
-		// We need to know when we are ready to send more data, and be able to handle acknowledgements
+		// We need to know when we are ready to send more data and be able to handle acknowledgements
 		// The queue needs to be durable so that it survives restarts of the application
         tcp_channel_->declareQueue(channel_config_.queue_name, AMQP::durable)
                     .onSuccess
@@ -321,7 +353,7 @@ private:
                             ack.setRoutingKey(channel_config_.routing_key);
                             wrapper.setAck(std::move(ack));
 
-                            queue_->push(std::move(wrapper));
+                            data_queue_->push(std::move(wrapper));
                         	listener_->onNumberOfReceivedMessages(channel_name_, ++num_received_);
 
                             // Don't acknowledge at this point - we only do that once we've handled the data itself
@@ -330,6 +362,7 @@ private:
                         {
                             LOG_DEBUG(channel_name_ << ": Starting consuming messages");
                         	setState_(ChannelState::active);
+                        	ready_callback_();
                         })
                         .onError([this](const char *message)
                         {
@@ -368,16 +401,12 @@ private:
 	}
 	std::atomic<size_t> num_received_ {0};
 	std::atomic<size_t> num_acknowledged_ {0};
-	MyRxDataQueuePtr queue_;
+	MyRxDataQueuePtr data_queue_;
+	MyRxAckQueuePtr ack_queue_;
 	std::shared_ptr<ChannelListener> listener_;
 };
-#endif
 
-/**
- * WARNING: The MyAmqpTxChannel currently has a thread per transmit which is inefficient if scaled to multiple channels. Needs to be
- * reimplemented so that all TX channels share a transmit thread. Previously this was done on the event thread, which coneptually wasn't a bad
- * approach, but did mean that the event queue could get hogged by waiting to transmit
- */
+
 class MyAmqpTxChannel : public MyAmqpChannel
 {
 public:
@@ -421,8 +450,6 @@ public:
 			return;
 		}
 
-		LOG_TRACE(channel_name_ << ": Data ready for transmit");
-
 		// Get a copy of a message on the queue in case there's any issue sending it
 		const auto message = queue_->peek();
 		if (!message)
@@ -431,22 +458,19 @@ public:
 			return;
 		}
 
-		// Reduce scope of mutex locking
+		if (!tcp_channel_->publish(channel_config_.exchange_name, channel_config_.routing_key, message->data(), message->size()))
 		{
-			if (!tcp_channel_->publish(channel_config_.exchange_name, channel_config_.routing_key, message->data(), message->size()))
-			{
-				std::ostringstream os;
-				os << "Failed to publish message " << message;
-				setState_(ChannelState::error);
-				on_error_callback_(tcp_connection_, os.str());
-			}
-			else
-			{
-				LOG_TRACE(channel_name_  << ": Transmit - " << num_transmitted_ << " : Message " << message);
-				queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
-				listener_->onNumberOfTransmittedMessages(channel_config_.exchange_name, ++num_transmitted_);
-				++current_batch_size;
-			}
+			std::ostringstream os;
+			os << "Failed to publish message " << message;
+			setState_(ChannelState::error);
+			on_error_callback_(tcp_connection_, os.str());
+		}
+		else
+		{
+			LOG_TRACE(channel_name_  << ": Transmit - " << num_transmitted_ << " : Message " << message);
+			queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
+			listener_->onNumberOfTransmittedMessages(channel_name_, ++num_transmitted_);
+			++current_batch_size;
 		}
 	}
 
@@ -477,7 +501,7 @@ private:
 
 		MyAmqpChannel::setupBaseTcpChannel();
 
-		// We need to know when we are ready to send more data, and be able to handle acknowledgements
+		// We need to know when we are ready to send more data and be able to handle acknowledgements
 		tcp_channel_->confirmSelect().onSuccess([this]()
 		{
 			LOG_TRACE(channel_name_ << ": channel in a confirm mode.");
