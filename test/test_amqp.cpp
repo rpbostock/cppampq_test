@@ -252,68 +252,6 @@ TEST_F(TestAmqp, testTransmitMultipleChannels_long)
 	testTransmitChannelWithManager_(num_messages, num_channels);
 }
 
-
-
-void TestAmqp::testTransmitChannel_(const size_t num_messages, const int num_channels)
-{
-	// Basic setup
-	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
-	controller.setMaxTransmitBatchSize(10000); // We're only interested in transmission so we can put this very high
-
-	std::vector<TxClientWrapper> transmitters;
-	for (auto i=0; i<num_channels; i++)
-	{
-		rmq::ChannelConfig config {"testTransmitChannel_exchange" + std::to_string(i)
-			, ""
-			, ""};
-		const auto channel_listener = std::make_shared<SimpleChannelListener>();
-		transmitters.emplace_back(controller.createTransmitChannel(config, channel_listener));
-	}
-	controller.start();
-
-	// Ensure we're up and running
-	auto start = std::chrono::high_resolution_clock::now();
-	while (!(controller.isConnectionReady()	&& std::ranges::all_of(transmitters,[](const auto &entry){ return entry.getListener()->isActive(); }))
-		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	}
-	GTEST_ASSERT_TRUE(controller.isConnectionReady());
-	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters,[](const auto &entry){ return entry.getListener()->isActive(); }));
-
-	// Send some messages
-	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue() != nullptr; }));
-
-	std::atomic send_complete(false);
-	std::jthread send_thread([&transmitters, &send_complete, num_messages]()
-	{
-		for (size_t i=0; i<num_messages; i++)
-		{
-			std::string message = "test message " + std::to_string(i);
-			auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
-			for (auto &entry : transmitters)
-			{
-				entry.getQueue()->push(message_vec);
-			}
-		}
-		send_complete.store(true);
-	});
-
-	// Wait for them all to be sent
-	// std::this_thread::sleep_for(std::chrono::seconds(1000));
-	start = std::chrono::high_resolution_clock::now();
-	while ( !(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfTransmittedMessages() == num_messages; })
-		&& send_complete.load())
-		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages) * num_channels)
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	}
-	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue()->isEmpty(); }));
-	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfTransmittedMessages() == num_messages; }));
-	GTEST_ASSERT_TRUE(send_complete.load());
-
-}
-
 void TestAmqp::testTransmitChannelWithManager_(const size_t num_messages, const int num_channels)
 {
 	// Basic setup
@@ -433,7 +371,9 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 {
 	// Basic setup
 	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
-	rmq::ChannelConfig config {"testTransmitChannel_short_exchange", "testTransmitChannel_short_queue", "testTransmitChannel_short_routing"};
+	rmq::ChannelConfig config {"testTransmitChannelWithReconnect_exchange"
+		, "testTransmitChannelWithReconnect_queue"
+		, "testTransmitChannelWithReconnect_routing"};
 	auto wrapper = controller.createTransmitChannel(config);
 	auto listener = wrapper.getListener();
 	controller.start();
