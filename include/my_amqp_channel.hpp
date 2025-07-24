@@ -1,4 +1,6 @@
 #pragma once
+#include "channel_listener.hpp"
+#include "channel_state.hpp"
 #include "queue.hpp"
 #include "logging.hpp"
 #include "message_wrapper.hpp"
@@ -6,7 +8,6 @@
 
 namespace rmq {
 
-enum class ChannelState { none, initialising, active, deactivating, inactive, error };
 using MyTxDataQueue = PipeNotificationQueue<std::shared_ptr<std::vector<char>>>;
 using MyTxDataQueuePtr = std::shared_ptr<MyTxDataQueue>;
 
@@ -17,78 +18,6 @@ using MyRxAckQueue = PipeNotificationQueue<IMessageAck>;
 using MyRxDataQueuePtr = std::shared_ptr<MyRxDataQueue>;
 using MyRxAckQueuePtr = std::shared_ptr<MyRxAckQueue>;
 
-class ChannelListener
-{
-public:
-	void onNumberOfTransmittedMessages(const std::string& channel_name, const size_t num_transmitted)
-	{
-		if (num_transmitted%100000 == 0)
-		{
-			LOG_INFO(channel_name << ": Number of transmitted messages: " << num_transmitted);
-		}
-		num_transmitted_.store(num_transmitted);
-	}
-
-	void onNumberOfReceivedMessages(const std::string& channel_name, const size_t num_received)
-	{
-		if (num_received%100000 == 0)
-		{
-			LOG_INFO(channel_name << ": Number of received messages: " << num_received);
-		}
-		num_received_.store(num_received);
-	}
-
-	void onNumberOfAcknowledgedMessages(const std::string& channel_name, const size_t num_acknowledged)
-	{
-		if (num_acknowledged%100000 == 0)
-		{
-			LOG_INFO(channel_name << ": Number of acknowledged messages: " << num_acknowledged);
-		}
-		num_acknowledged_.store(num_acknowledged);
-	}
-
-	void onChannelStateChange(const std::string& channel_name, const ChannelState state)
-	{
-		LOG_INFO(channel_name << ": Channel state changed to " << static_cast<int>(state));
-		state_.store(state);
-	}
-
-	void onRemoteQueueSize(const std::string& channel_name, const uint32_t queue_size)
-	{
-		remote_queue_size_.store(queue_size);
-	}
-
-	size_t getNumberOfTransmittedMessages() const
-	{
-		return num_transmitted_.load();
-	}
-
-	size_t getNumberOfReceivedMessages() const
-	{
-		return num_received_.load();
-	}
-
-	size_t getNumberOfAcknowledgedMessages() const
-	{
-		return num_acknowledged_.load();
-	}
-
-	size_t getRemoteQueueSize() const
-	{
-		return remote_queue_size_.load();
-	}
-
-	bool isActive() const
-	{
-		return state_.load() == ChannelState::active;
-	}
-private:
-	std::atomic<size_t> remote_queue_size_ {0};
-	std::atomic<size_t> num_transmitted_ {0};
-	std::atomic<size_t> num_received_ {0};
-	std::atomic<size_t> num_acknowledged_ {0};
-	std::atomic<ChannelState> state_ {ChannelState::none};
-};
 
 /**
  * This class will handle the specific parts of AMQP relating to the channel
@@ -183,7 +112,7 @@ public:
 	                , std::function<void()> ready_callback
 	                , const MyRxDataQueuePtr &data_queue
 	                , const MyRxAckQueuePtr &ack_queue
-	                , const std::shared_ptr<ChannelListener> &listener
+	                , const std::shared_ptr<IChannelListener> &listener
 	                , const size_t num_received = 0
 	                , const size_t num_acknowledged_ = 0
 	) : MyAmqpChannel(channel_config
@@ -192,10 +121,10 @@ public:
 	                  , std::move(ready_callback)
 	                  , "RX - " + channel_config.queue_name)
 	    , num_received_(num_received)
-	    , num_acknowledged_(num_acknowledged_)
 	    , data_queue_(data_queue)
 	    , ack_queue_(ack_queue)
 	    , listener_(listener)
+	    , ack_offset_due_to_reconnects_(num_acknowledged_)
 	{
 		initialise_();
 	}
@@ -224,20 +153,47 @@ public:
 			return;
 		}
 
+		// If there is a problem with the channel at this point it doesn't matter so much as there's not a lot we can
+		// do about it and we'd need to reprocess all received messages anyway (no way to ack messages after a disconnect)
+		while (!ack_queue_->isEmpty())
+		{
+			const auto message = ack_queue_->peek();
+			delivery_tags_.insert(message.getDeliveryTag());
+			ack_queue_->pop();
+		}
+
+		// Check whether they are contiguous - they should be in our case as we aren't parallel processing messages
+		auto it = std::ranges::adjacent_find(delivery_tags_,
+		                                     [](uint64_t a, uint64_t b) { return b != a + 1; });
+
+		// We could send the other individual tags, but I'm interested to see how much of an improvement this makes (if any!)
+		uint64_t latest_tag = 0;
+		if (it != delivery_tags_.end()) {
+			// Discontinuity found: *it is the last number before the gap
+			// *std::next(it) is the first number after the gap
+			// We need to send an ACK for the range [*it, *std::next(it))
+			LOG_DEBUG(channel_name_ << ": Discontinuity found in delivery tags - sending ACK for range " << *it << " - " << *std::next(it));
+			latest_tag = *it;
+		}
+		else
+		{
+			LOG_DEBUG(channel_name_ << ": No discontinuity found in delivery tags - sending ACK for all " << delivery_tags_.size() << " messages");
+			latest_tag = *delivery_tags_.rbegin();
+		}
+
 		// Get a copy of a message on the queue in case there's any issue sending it
-		const auto message = ack_queue_->peek();
-		if (!tcp_channel_->ack(message.getDeliveryTag()))
+		if (!tcp_channel_->ack(latest_tag, AMQP::multiple))
 		{
 			std::ostringstream os;
-			os << "Failed to publish acknowledgement " << message.getConsumerTag();
+			os << "Failed to publish acknowledgement " << latest_tag;
 			setState_(ChannelState::error);
 			on_error_callback_(tcp_connection_, os.str());
 		}
 		else
 		{
-			LOG_DEBUG(channel_name_  << ": ACKed - " << num_acknowledged_ << " : Message " << message.getDeliveryTag());
-			ack_queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
-			listener_->onNumberOfAcknowledgedMessages(channel_name_, ++num_acknowledged_);
+			auto num_acknowledged = ack_offset_due_to_reconnects_ + latest_tag;
+			LOG_DEBUG(channel_name_  << ": ACKed - " << num_acknowledged << " : Message " << latest_tag);
+			listener_->onNumberOfAcknowledgedMessages(channel_name_, num_acknowledged);
 			++current_batch_size;
 		}
 	}
@@ -400,10 +356,13 @@ private:
 		LOG_INFO(channel_name_ << ": has been deactivated");
 	}
 	std::atomic<size_t> num_received_ {0};
-	std::atomic<size_t> num_acknowledged_ {0};
+	// std::atomic<size_t> num_acknowledged_ {0};
 	MyRxDataQueuePtr data_queue_;
 	MyRxAckQueuePtr ack_queue_;
-	std::shared_ptr<ChannelListener> listener_;
+	std::shared_ptr<IChannelListener> listener_;
+
+	std::set<uint64_t> delivery_tags_; // All the tags we've received!
+	std::atomic<size_t> ack_offset_due_to_reconnects_{0};
 };
 
 
@@ -415,7 +374,7 @@ public:
 	                , std::function<void(AMQP::TcpConnection *connection, const std::string &)> error_callback
 	                , std::function<void()> ready_callback
 	                , MyTxDataQueuePtr queue
-	                , const std::shared_ptr<ChannelListener> &listener
+	                , const std::shared_ptr<IChannelListener> &listener
 	                , const size_t num_transmitted = 0) : MyAmqpChannel(channel_config
 	                                                                    , tcp_connection
 	                                                                    , std::move(error_callback)
@@ -498,7 +457,7 @@ private:
 			throw std::runtime_error(channel_name_ + ": Cannot create channel without a listener");
 		}
 
-
+		listener_->onConnect(channel_name_);
 		MyAmqpChannel::setupBaseTcpChannel();
 
 		// We need to know when we are ready to send more data and be able to handle acknowledgements
@@ -513,6 +472,10 @@ private:
 
 			// See if there is any data to send yet!
 			ready_callback_();
+		}).onAck([this](uint32_t deliveryTag, bool multiple)
+		{
+			// We need to handle acks on the transmit side so that we know when we don't need to hold transmit data anymore
+			listener_->onAcknowledgement(channel_name_, deliveryTag, multiple);
 		}).onError([this](const char *message)
 		{
 			setState_(ChannelState::error);
@@ -531,7 +494,7 @@ private:
 	MyTxDataQueuePtr queue_;
 
 	// Receives all the event updates from this channel as the TCPChannel is not thread safe
-	std::shared_ptr<ChannelListener> listener_;
+	std::shared_ptr<IChannelListener> listener_;
 };
 
 } // rmq

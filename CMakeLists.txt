@@ -24,6 +24,7 @@ add_executable(cppampq_test
   src/logging.cpp
   test/main.cpp
   test/test_amqp.cpp
+  test/test_reliable_message_manager.cpp
 )
 
 

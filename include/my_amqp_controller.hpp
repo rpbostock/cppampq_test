@@ -86,7 +86,7 @@ private:
 };
 
 
-using ChannelListenerPtr = std::shared_ptr<ChannelListener>;
+
 using ChannelHandlerTxPtr = std::unique_ptr<MyAmqpTxChannel>;
 using ChannelHandlerRxPtr = std::unique_ptr<MyAmqpRxChannel>;
 template <typename MessageType, typename ChannelTypePtr>
@@ -134,7 +134,7 @@ public:
 	}
 
 private:
-	std::shared_ptr<ChannelListener> listener_;
+	ChannelListenerPtr listener_;
 	std::shared_ptr<MessageType> queue_;
 	// ReSharper disable once CppDFANotInitializedField
 	const ChannelConfig config_;
@@ -196,7 +196,7 @@ public:
 		LOG_TRACE("MyAmqpController::~MyAmqpController() - done");
 	}
 
-	TxClientWrapper createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
+	TxClientWrapper createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<SimpleChannelListener>())
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		if (!listener)
@@ -216,7 +216,7 @@ public:
 	}
 
 
-	RxClientWrapper createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<ChannelListener>())
+	RxClientWrapper createReceiveChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<SimpleChannelListener>())
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
 		if (!listener)

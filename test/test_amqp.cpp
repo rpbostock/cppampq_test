@@ -3,7 +3,10 @@
 #include "my_amqp_controller_no_channel.hpp"
 #include "my_amqp_controller.hpp"
 #include "rx_client_wrapper.hpp"
+#include "test_reliable_message_manager.hpp"
 #include "tx_client_wrapper.hpp"
+
+using namespace rmq;
 
 TEST_F(TestAmqp, testStartStopExampleWithSingleChannel_short)
 {
@@ -222,7 +225,7 @@ TEST_F(TestAmqp, testTransmitChannel_short	)
 	constexpr size_t num_messages = 100;
 	constexpr size_t num_channels = 1;
 	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
-	testTransmitChannel_(num_messages, num_channels);
+	testTransmitChannelWithManager_(num_messages, num_channels);
 }
 
 TEST_F(TestAmqp, testTransmitChannel_long)
@@ -230,7 +233,7 @@ TEST_F(TestAmqp, testTransmitChannel_long)
 	constexpr size_t num_messages = 1E6;
 	constexpr size_t num_channels = 1;
 	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
-	testTransmitChannel_(num_messages, num_channels);
+	testTransmitChannelWithManager_(num_messages, num_channels);
 }
 
 TEST_F(TestAmqp, testTransmitMultipleChannels_short	)
@@ -238,7 +241,7 @@ TEST_F(TestAmqp, testTransmitMultipleChannels_short	)
 	constexpr size_t num_messages = 100;
 	constexpr size_t num_channels = 10;
 	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
-	testTransmitChannel_(num_messages, num_channels);
+	testTransmitChannelWithManager_(num_messages, num_channels);
 }
 
 TEST_F(TestAmqp, testTransmitMultipleChannels_long)
@@ -246,7 +249,7 @@ TEST_F(TestAmqp, testTransmitMultipleChannels_long)
 	constexpr size_t num_messages = 1E6;
 	constexpr size_t num_channels = 10;
 	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
-	testTransmitChannel_(num_messages, num_channels);
+	testTransmitChannelWithManager_(num_messages, num_channels);
 }
 
 
@@ -263,7 +266,7 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages, const int num_cha
 		rmq::ChannelConfig config {"testTransmitChannel_exchange" + std::to_string(i)
 			, ""
 			, ""};
-		const auto channel_listener = std::make_shared<rmq::ChannelListener>();
+		const auto channel_listener = std::make_shared<SimpleChannelListener>();
 		transmitters.emplace_back(controller.createTransmitChannel(config, channel_listener));
 	}
 	controller.start();
@@ -311,9 +314,97 @@ void TestAmqp::testTransmitChannel_(const size_t num_messages, const int num_cha
 
 }
 
+void TestAmqp::testTransmitChannelWithManager_(const size_t num_messages, const int num_channels)
+{
+	// Basic setup
+	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
+	controller.setMaxTransmitBatchSize(10000); // We're only interested in transmission so we can put this very high
+
+	std::vector<TxClientWrapper> transmitters;
+	for (auto i=0; i<num_channels; i++)
+	{
+		rmq::ChannelConfig config {"testTransmitChannel_exchange" + std::to_string(i)
+			, ""
+			, ""};
+		const auto channel_listener = std::make_shared<TestReliableMessageManager>(num_messages);
+		transmitters.emplace_back(controller.createTransmitChannel(config, channel_listener));
+	}
+	controller.start();
+
+	// Ensure we're up and running
+	auto start = std::chrono::high_resolution_clock::now();
+	while (!(controller.isConnectionReady()	&& std::ranges::all_of(transmitters,[](const auto &entry){ return entry.getListener()->isActive(); }))
+		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_TRUE(controller.isConnectionReady());
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters,[](const auto &entry){ return entry.getListener()->isActive(); }));
+
+	// Send some messages
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue() != nullptr; }));
+
+	std::atomic send_complete(false);
+	std::jthread send_thread([&transmitters, &send_complete, num_messages]()
+	{
+		bool new_data = true;
+		bool max_unacked_reached = false;
+		constexpr size_t max_unacked = 1000;
+		while (new_data || max_unacked_reached)
+		{
+			new_data = false;
+			max_unacked_reached = false;
+
+			for ( auto entry : transmitters)
+			{
+				auto reliable_message_manager = std::dynamic_pointer_cast<TestReliableMessageManager>(entry.getListener());
+				if (reliable_message_manager != nullptr && !reliable_message_manager->isEmpty() && reliable_message_manager->numUnacknowledged() < max_unacked)
+				{
+					auto message_vec = reliable_message_manager->getNextMessage();
+					std::string message = std::string(message_vec->begin(), message_vec->end());
+					LOG_DEBUG("Sending message " << message << " num unacked: " << reliable_message_manager->numUnacknowledged() << " num unsent " << reliable_message_manager->numUnsent());
+					entry.getQueue()->push(message_vec);
+					new_data = true;
+				}
+				if (reliable_message_manager->numUnacknowledged() >= max_unacked)
+				{
+					max_unacked_reached = true;
+				}
+			}
+			if (max_unacked_reached && !new_data)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(10));
+			}
+		}
+		LOG_INFO("Completed adding " << num_messages << " messages");
+		send_complete.store(true);
+	});
+
+	// Wait for them all to be sent
+	// std::this_thread::sleep_for(std::chrono::seconds(1000));
+	start = std::chrono::high_resolution_clock::now();
+	while ( !(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() == num_messages; })
+		&& send_complete.load())
+		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages) * num_channels)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_LE(std::chrono::high_resolution_clock::now() - start, getTransmitTimeout_(num_messages) * num_channels) << "Timeout waiting for all data to be transmitted";
+
+	for (auto entry : transmitters)
+	{
+		LOG_INFO("number of acknowledged messages: " << entry.getListener()->getNumberOfAcknowledgedMessages());
+	}
+
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue()->isEmpty(); }));
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() == num_messages; }));
+	GTEST_ASSERT_TRUE(send_complete.load());
+
+}
+
 std::chrono::seconds TestAmqp::getTransmitTimeout_(const size_t num_messages)
 {
-	return std::chrono::seconds(static_cast<int>( ceil(num_messages / 5000.0)));
+	return std::chrono::seconds(static_cast<int>( ceil(num_messages / 1000.0)));
 }
 
 std::chrono::seconds TestAmqp::getReceiveTimeout_(const size_t num_messages)
@@ -638,7 +729,7 @@ void TestAmqp::testSingleTxMultipleRx_(const size_t num_messages, const size_t n
 	config.qos_prefetch_count = 200;
 
 	// Need a single transmitter
-	const auto tx_channel_listener = std::make_shared<rmq::ChannelListener>();
+	const auto tx_channel_listener = std::make_shared<SimpleChannelListener>();
 	const std::string tx_channel_name = controller.createTransmitChannel(config, tx_channel_listener).getChannelName();
 
 	std::set<RxClientWrapper> rx_clients;

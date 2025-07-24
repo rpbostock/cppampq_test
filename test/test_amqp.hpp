@@ -83,6 +83,7 @@ private:
 	FRIEND_TEST(TestAmqp, testTransmitMultipleChannels_short);
 	FRIEND_TEST(TestAmqp, testTransmitMultipleChannels_long);
 	static void testTransmitChannel_(size_t num_messages, int num_channels = 1);
+	static void testTransmitChannelWithManager_(size_t num_messages, int num_channels = 1);
 	static std::chrono::seconds getTransmitTimeout_(const size_t num_messages);
 
 
