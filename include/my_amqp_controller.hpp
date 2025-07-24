@@ -225,7 +225,7 @@ public:
 		}
 		if (maintain_connection.load())
 		{
-			throw std::runtime_error("Cannot create transmit channel while maintaining connection");
+			throw std::runtime_error("Cannot create receive channel while maintaining connection");
 		}
 
 		auto channel_name = config.queue_name;
@@ -319,7 +319,7 @@ public:
 	void triggerClose() const
 	{
 		LOG_INFO("Triggering close");
-		if (notification_pipe_transmitter_->notify('C'))
+		if (notification_pipe_transmitter_ && notification_pipe_transmitter_->notify('C'))
 		{
 			LOG_INFO("Sent close request");
 		}

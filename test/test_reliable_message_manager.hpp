@@ -122,7 +122,7 @@ private:
     std::atomic<ChannelState> state_{ChannelState::none};
 
     // The aim here is that we maintain ack numbers for the current connection - too complicated otherwise
-    std::mutex mutex_;
+    mutable std::mutex mutex_;
     std::set<uint64_t> to_tx_numbers_; // Not been sent yet
     std::set<uint64_t> sent_messages_; // In transit, but not acked
     uint64_t offset_due_to_reconnect_{0};
