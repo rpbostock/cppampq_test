@@ -426,7 +426,7 @@ public:
 		}
 		else
 		{
-			LOG_TRACE(channel_name_  << ": Transmit - " << num_transmitted_ << " : Message " << message);
+			LOG_DEBUG(channel_name_  << ": Transmit - " << num_transmitted_ << " : Message " << message);
 			queue_->pop(); // Now remove the message from the queue as we've successfully transmitted
 			listener_->onNumberOfTransmittedMessages(channel_name_, ++num_transmitted_);
 			++current_batch_size;

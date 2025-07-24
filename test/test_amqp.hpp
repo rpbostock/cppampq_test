@@ -83,6 +83,7 @@ private:
 	FRIEND_TEST(TestAmqp, testTransmitMultipleChannels_short);
 	FRIEND_TEST(TestAmqp, testTransmitMultipleChannels_long);
 	static void testTransmitChannelWithManager_(size_t num_messages, int num_channels = 1);
+	static std::jthread send_data(std::vector<rmq::TxClientWrapper> &wrappers, std::atomic<bool>& send_complete, int num_messages);
 	static std::chrono::seconds getTransmitTimeout_(const size_t num_messages);
 
 

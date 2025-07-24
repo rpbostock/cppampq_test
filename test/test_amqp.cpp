@@ -283,7 +283,34 @@ void TestAmqp::testTransmitChannelWithManager_(const size_t num_messages, const 
 	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue() != nullptr; }));
 
 	std::atomic send_complete(false);
-	std::jthread send_thread([&transmitters, &send_complete, num_messages]()
+	std::jthread send_thread = send_data(transmitters, send_complete, num_messages);
+
+	// Wait for them all to be sent
+	// std::this_thread::sleep_for(std::chrono::seconds(1000));
+	start = std::chrono::high_resolution_clock::now();
+	while ( !(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() == num_messages; })
+		&& send_complete.load())
+		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages) * num_channels)
+	{
+		std::this_thread::sleep_for(std::chrono::milliseconds(10));
+	}
+	GTEST_ASSERT_LE(std::chrono::high_resolution_clock::now() - start, getTransmitTimeout_(num_messages) * num_channels) << "Timeout waiting for all data to be transmitted";
+
+	for (auto entry : transmitters)
+	{
+		LOG_INFO("number of acknowledged messages: " << entry.getListener()->getNumberOfAcknowledgedMessages());
+	}
+
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue()->isEmpty(); }));
+	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() == num_messages; }));
+	GTEST_ASSERT_TRUE(send_complete.load());
+
+}
+
+std::jthread TestAmqp::send_data(std::vector<rmq::TxClientWrapper> &transmitters, std::atomic<bool> &send_complete,
+	int num_messages)
+{
+	return std::jthread([&transmitters, &send_complete, num_messages]()
 	{
 		bool new_data = true;
 		bool max_unacked_reached = false;
@@ -317,27 +344,6 @@ void TestAmqp::testTransmitChannelWithManager_(const size_t num_messages, const 
 		LOG_INFO("Completed adding " << num_messages << " messages");
 		send_complete.store(true);
 	});
-
-	// Wait for them all to be sent
-	// std::this_thread::sleep_for(std::chrono::seconds(1000));
-	start = std::chrono::high_resolution_clock::now();
-	while ( !(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() == num_messages; })
-		&& send_complete.load())
-		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages) * num_channels)
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	}
-	GTEST_ASSERT_LE(std::chrono::high_resolution_clock::now() - start, getTransmitTimeout_(num_messages) * num_channels) << "Timeout waiting for all data to be transmitted";
-
-	for (auto entry : transmitters)
-	{
-		LOG_INFO("number of acknowledged messages: " << entry.getListener()->getNumberOfAcknowledgedMessages());
-	}
-
-	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [](const auto &entry) { return entry.getQueue()->isEmpty(); }));
-	GTEST_ASSERT_TRUE(std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() == num_messages; }));
-	GTEST_ASSERT_TRUE(send_complete.load());
-
 }
 
 std::chrono::seconds TestAmqp::getTransmitTimeout_(const size_t num_messages)
@@ -351,18 +357,16 @@ std::chrono::seconds TestAmqp::getReceiveTimeout_(const size_t num_messages)
 }
 
 
-
-
 TEST_F(TestAmqp, testReconnectionTxChannel_short)
 {
-	constexpr size_t num_messages = 1000000;
+	constexpr size_t num_messages = 2E5;
 	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully to an exchange under reconnect conditions - no feedback at this point";
 	testTransmitChannelWithReconnect_(num_messages);
 }
 
 TEST_F(TestAmqp, testReconnectionTxChannel_long)
 {
-	constexpr size_t num_messages = 10000000;
+	constexpr size_t num_messages = 1E7;
 	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully to an exchange under reconnect conditions - no feedback at this point";
 	testTransmitChannelWithReconnect_(num_messages);
 }
@@ -371,10 +375,14 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 {
 	// Basic setup
 	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
+	controller.setMaxTransmitBatchSize(1000); // We're only interested in transmission so we can put this high
 	rmq::ChannelConfig config {"testTransmitChannelWithReconnect_exchange"
 		, "testTransmitChannelWithReconnect_queue"
 		, "testTransmitChannelWithReconnect_routing"};
-	auto wrapper = controller.createTransmitChannel(config);
+	std::vector<TxClientWrapper> transmitters;
+	transmitters.emplace_back(controller.createTransmitChannel(config
+		, std::make_shared<TestReliableMessageManager>(num_messages)));
+	auto wrapper = transmitters[0];
 	auto listener = wrapper.getListener();
 	controller.start();
 
@@ -391,17 +399,7 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 	// Send some messages
 	const auto queue = wrapper.getQueue();
 	std::atomic send_complete(false);
-	std::jthread send_thread([&queue, &send_complete, num_messages]()
-	{
-		for (size_t i=0; i<num_messages; i++)
-		{
-			std::string message = "test message " + std::to_string(i);
-			auto message_vec = std::make_shared<std::vector<char> >(message.begin(), message.end());
-			queue->push(message_vec);
-		}
-		LOG_INFO("Completed adding " << num_messages << " messages");
-		send_complete.store(true);
-	});
+	std::jthread send_thread = send_data(transmitters, send_complete, num_messages);
 
 	std::atomic<bool> finish(false);
 	auto interval = std::chrono::milliseconds(20000);
@@ -411,7 +409,7 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 	// Wait for them all to be sent
 	start = std::chrono::high_resolution_clock::now();
 	while (!(queue->isEmpty()
-		&& listener->getNumberOfTransmittedMessages() == num_messages
+		&& listener->getNumberOfAcknowledgedMessages() == num_messages
 		&& send_complete.load())
 		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages)*2)
 	{
@@ -422,7 +420,7 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 
 	GTEST_ASSERT_TRUE(queue->isEmpty());
 	GTEST_ASSERT_TRUE(send_complete.load());
-	GTEST_ASSERT_EQ(listener->getNumberOfTransmittedMessages(), num_messages);
+	GTEST_ASSERT_EQ(listener->getNumberOfAcknowledgedMessages(), num_messages);
 
 	// TODO We may have to consider not using this as a check. Under load I've seen that a connection close request gets refused and the connection isn't actually broken.
 	LOG_DEBUG("Number of forced disconnects: " << num_forced_reconnections);

@@ -349,11 +349,14 @@ private:
 		{
 			val.resetChannel();
 			val.queue()->setupNotificationPipe('X', nullptr);
+			val.queue()->flush();
 		}
 		for (auto &val: rx_channel_wrappers_ | std::views::values)
 		{
 			val.resetChannel();
 			val.getAckQueue()->setupNotificationPipe('X', nullptr);
+			val.queue()->flush();
+			val.getAckQueue()->flush();
 		}
 
 
