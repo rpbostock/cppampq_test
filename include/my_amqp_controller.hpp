@@ -196,6 +196,8 @@ public:
 		LOG_TRACE("MyAmqpController::~MyAmqpController() - done");
 	}
 
+	std::string getAddress() const { return address_; }
+
 	TxClientWrapper createTransmitChannel(const ChannelConfig& config, ChannelListenerPtr listener=std::make_shared<SimpleChannelListener>())
 	{
 		std::lock_guard<std::mutex> lock(mutex_);

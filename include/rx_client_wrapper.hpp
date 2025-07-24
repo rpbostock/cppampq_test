@@ -12,6 +12,27 @@ public:
 	channel_name_(channel_name), listener_(listener), data_queue_(data_queue), ack_queue_(ack_queue)
 	{}
 
+	RxClientWrapper(const RxClientWrapper &other) :
+		channel_name_(other.channel_name_), listener_(other.listener_), data_queue_(other.data_queue_), ack_queue_(other.ack_queue_)
+	{}
+
+	RxClientWrapper(RxClientWrapper &&other) noexcept :
+		channel_name_(other.channel_name_), listener_(other.listener_), data_queue_(other.data_queue_), ack_queue_(other.ack_queue_)
+	{}
+
+	// Add move assignment operator
+	RxClientWrapper& operator=(RxClientWrapper&& other) noexcept {
+		if (this != &other) {
+			channel_name_ = std::move(other.channel_name_);
+			listener_ = std::move(other.listener_);
+			data_queue_ = std::move(other.data_queue_);
+			ack_queue_ = std::move(other.ack_queue_);
+		}
+		return *this;
+	}
+
+
+
 	std::string getChannelName() const { return channel_name_; }
 	ChannelListenerPtr getListener() const  { return listener_; }
 	MyRxDataQueuePtr getQueue() const { return data_queue_; }

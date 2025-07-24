@@ -5,6 +5,7 @@
 
 #include "channel_config.hpp"
 #include "my_amqp_controller.hpp"
+#include "test_rx_client_wrapper.hpp"
 
 class TestAmqp : public ::testing::Test
 {
@@ -66,8 +67,14 @@ private:
 	};
 
 	// Force connections to close
-	static std::jthread forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval, int& num_forced_reconnections);
+	static std::jthread forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval, std::atomic<int>& num_forced_reconnections);
 	static int forceCloseConnections_();
+
+	// Check up on connection, transmit and receive readiness at the beginning
+	static void checkConnectionAndChannels_(
+		const rmq::MyAmqpController &controller,
+		const std::vector<TxClientWrapper>& tx_clients = {},
+		const std::vector<TestRxClientWrapper>& rx_clients = {});
 
 	// Verification of start stop behaviour on the core connection and handler (excludes channels)
 	static bool testStartStopRealNoChannel_(int num_repeats, int num_threads);
@@ -86,7 +93,6 @@ private:
 	static std::jthread send_data(std::vector<rmq::TxClientWrapper> &wrappers, std::atomic<bool>& send_complete, int num_messages);
 	static std::chrono::seconds getTransmitTimeout_(const size_t num_messages);
 
-
 	FRIEND_TEST(TestAmqp, testReconnectionTxChannel_short);
 	FRIEND_TEST(TestAmqp, testReconnectionTxChannel_long);
 	static void testTransmitChannelWithReconnect_(const size_t num_messages);
@@ -95,6 +101,7 @@ private:
 	FRIEND_TEST(TestAmqp, testReceiveChannel_short);
 	FRIEND_TEST(TestAmqp, testReceiveChannel_long);
 	static void testReceiveChannelAsync_(const size_t num_messages);
+	static std::jthread receive_data(std::vector<TestRxClientWrapper> &wrappers, std::atomic<bool>& finish_now);
 
 	FRIEND_TEST(TestAmqp, testTxRxMultipleSeparateChannels_short);
 	FRIEND_TEST(TestAmqp, testTxRxMultipleSeparateChannels_long);
@@ -103,7 +110,14 @@ private:
 	static std::chrono::seconds getReceiveTimeout_(const size_t num_messages);
 
 	FRIEND_TEST(TestAmqp, testSingleTxMultipleRx_short);
+	FRIEND_TEST(TestAmqp, testSingleTxMultipleRx_long);
+	FRIEND_TEST(TestAmqp, testSingleTxMultipleRxReconnect_short);
+	FRIEND_TEST(TestAmqp, testSingleTxMultipleRxReconnect_long);
 	static void testSingleTxMultipleRx_(size_t num_messages, size_t num_rx_channels);
+	static void testSingleTxMultipleRxReconnect_(size_t num_messages, size_t num_rx_channels, bool force_reconnects);
+
+	FRIEND_TEST(TestAmqp, testMultipleTxRxHearbeat_short);
+	static void testMultipleTxRxHearbeat_(size_t num_messages, size_t num_channels);
 
 	// Example tests looking at specific core functionality and stability
 	static bool testStartStopExampleWithSingleChannel_(int num_repeats, int num_threads);
