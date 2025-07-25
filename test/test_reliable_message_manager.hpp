@@ -47,22 +47,34 @@ public:
         // Got to assume that we've lost all the transmitted data that wasn't acked
         to_tx_numbers_.insert(sent_messages_.begin(), sent_messages_.end());
         sent_messages_.clear();
+        LOG_DEBUG("Num messages, " << num_messages_ << ", num unsent, " << to_tx_numbers_.size()  << ", offset calculated, " << offset_due_to_reconnect_);
         offset_due_to_reconnect_ = num_messages_ - to_tx_numbers_.size();
     }
 
+    /**
+     *
+     * @param channel_name - name of channel that this is operating on
+     * @param delivery_tag - starting from 1, so there will always be an offset of 1
+     * @param multiple - if true, then ack all delivery tags up to and including this one
+     */
     void onAcknowledgement(const std::string& channel_name, uint64_t delivery_tag, bool multiple) override {
         std::lock_guard lock(mutex_);
-        auto local_val = delivery_tag + offset_due_to_reconnect_;
+        auto local_val = delivery_tag + offset_due_to_reconnect_ - 1;
         if (!multiple) {
+            const auto size_before = sent_messages_.size();
             sent_messages_.erase(local_val);
-            ++num_acknowledged_;
+            num_acknowledged_ += size_before - sent_messages_.size();
         } else {
             const auto size_before = sent_messages_.size();
             sent_messages_.erase(sent_messages_.begin(),
                                 sent_messages_.upper_bound(local_val));
             num_acknowledged_ += size_before - sent_messages_.size();
         }
-        LOG_DEBUG("Tx ACK up to " << local_val << " (multiple: " << multiple << ")" );
+        LOG_DEBUG("Connection: Num acknowledged, " << num_acknowledged_
+            << ", num unacked, " << sent_messages_.size()
+            << ", num unsent, " << to_tx_numbers_.size()
+            << ", delivery_tag, " << static_cast<int>(delivery_tag)
+            );
     }
 
 
