@@ -92,7 +92,10 @@ private:
 	FRIEND_TEST(TestAmqp, testTransmitMultipleChannels_short);
 	FRIEND_TEST(TestAmqp, testTransmitMultipleChannels_long);
 	static void testTransmitChannelWithManager_(size_t num_messages, int num_channels = 1);
-	static std::jthread send_data(std::vector<rmq::TxClientWrapper> &wrappers, std::atomic<bool>& send_complete, int num_messages);
+	static std::jthread send_data(std::vector<rmq::TxClientWrapper> &transmitters
+		, std::atomic<bool> &send_complete
+		, int num_messages
+		, const size_t tx_qos_prefetch);
 	static std::chrono::seconds getTransmitTimeout_(const size_t num_messages);
 
 	FRIEND_TEST(TestAmqp, testReconnectionTxChannel_short);
@@ -116,7 +119,8 @@ private:
 	FRIEND_TEST(TestAmqp, testSingleTxMultipleRxReconnect_short);
 	FRIEND_TEST(TestAmqp, testSingleTxMultipleRxReconnect_long);
 	static void testSingleTxMultipleRx_(size_t num_messages, size_t num_rx_channels);
-	static void testSingleTxMultipleRxReconnect_(size_t num_messages, size_t num_rx_channels, bool force_reconnects);
+	static void testSingleTxMultipleRxReconnect_(size_t num_messages, size_t num_rx_channels, bool force_reconnects, size_t
+	                                             rx_qos_prefetch, size_t tx_qos_prefetch);
 
 	FRIEND_TEST(TestAmqp, testMultipleTxRxHearbeat_short);
 	static void testMultipleTxRxHearbeat_(size_t num_messages, size_t num_channels);
