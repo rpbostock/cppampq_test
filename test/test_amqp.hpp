@@ -67,7 +67,9 @@ private:
 	};
 
 	// Force connections to close
-	static std::jthread forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval, std::atomic<int>& num_forced_reconnections);
+	static std::shared_ptr<std::jthread> forceCloseConnections(std::atomic<bool> &finish,
+	                                                           const std::chrono::milliseconds &interval,
+	                                                           std::atomic<int> &num_forced_reconnections);
 	static int forceCloseConnections_();
 
 	// Check up on connection, transmit and receive readiness at the beginning

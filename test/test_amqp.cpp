@@ -175,7 +175,7 @@ bool TestAmqp::testForceReconnectNoChannel_(int num_repeats, int num_threads)
 		{
 			thread.thread.join();
 		}
-		forceDisconnectThread.join();
+		forceDisconnectThread->join();
 
 		LOG_DEBUG("Number of forced disconnects: " << num_forced_reconnections);
 		if (std::ranges::any_of(thread_wrappers, [&num_forced_reconnections](const auto &wrapper) { return abs(wrapper.num_reconnections - num_forced_reconnections) > 1; }))
@@ -193,27 +193,38 @@ bool TestAmqp::testForceReconnectNoChannel_(int num_repeats, int num_threads)
 	return true;
 }
 
-std::jthread TestAmqp::forceCloseConnections(std::atomic<bool>& finish, const std::chrono::milliseconds& interval, std::atomic<int>& num_forced_reconnections)
+std::shared_ptr<std::jthread> TestAmqp::forceCloseConnections(std::atomic<bool> &finish,
+                                                              const std::chrono::milliseconds &interval,
+                                                              std::atomic<int> &num_forced_reconnections)
 {
-	std::atomic<int> rc(0);
-	std::jthread forceClose([&interval, &finish, &rc, &num_forced_reconnections]() {
+	// Deliberately copy the interval in otherwise it is a reference to a variable that disappear...
+	return std::make_shared<std::jthread>([interval, &finish, &num_forced_reconnections]() {
 		while (finish.load() == false)
 		{
-			std::this_thread::sleep_for(interval);
+			// Sometimes the intervals can be quite large - eg. 20s, so we want to be able to interrupt it without
+			// having to wait for the full period.
+			constexpr size_t sleep_period_ms{100};
+			for (auto i = 0; i < ceil(interval.count() / sleep_period_ms); ++i)
+			{
+				std::this_thread::sleep_for(std::chrono::milliseconds(sleep_period_ms));
+				if (finish.load()) { return; }
+			}
+
 			LOG_INFO("Forcing close of connections by timer interval after delay of " << interval.count() << "ms");
-			rc = forceCloseConnections_();
-				if (rc == 0)
+			auto rc = forceCloseConnections_();
+			if (rc == 0)
 			{
 				++num_forced_reconnections;
 				LOG_INFO("All connections closed. Forced disconnects: " << num_forced_reconnections);
 			}
 			else
 			{
-				break;
+				// Indicate an error through this - bit messy, but can't throw an exception easily
+				num_forced_reconnections = -1;
+				return;
 			}
 		}
 	});
-	return forceClose;
 }
 
 int TestAmqp::forceCloseConnections_()
@@ -448,7 +459,7 @@ void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
 	finish.store(true);
-	forceDisconnectThread.join();
+	forceDisconnectThread->join();
 
 	GTEST_ASSERT_TRUE(queue->isEmpty());
 	GTEST_ASSERT_TRUE(send_complete.load());
@@ -600,6 +611,41 @@ TEST_F(TestAmqp, testTxRxMultipleSeparateChannels_long)
 
 
 
+
+
+TEST_F(TestAmqp, testSingleTxMultipleRx_short)
+{
+	constexpr size_t num_messages = 1E4;
+	constexpr size_t num_rx_channels = 2;
+	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_rx_channels << " receive channels";
+	testSingleTxMultipleRxReconnect_(num_messages, num_rx_channels, false);
+}
+
+TEST_F(TestAmqp, testSingleTxMultipleRx_long)
+{
+	constexpr size_t num_messages = 1E6;
+	constexpr size_t num_rx_channels = 2;
+	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_rx_channels << " receive channels";
+	testSingleTxMultipleRxReconnect_(num_messages, num_rx_channels, false);
+}
+
+TEST_F(TestAmqp, testSingleTxMultipleRxReconnect_short)
+{
+	constexpr size_t num_messages = 5E4;
+	constexpr size_t num_channels = 1;
+	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_channels << " receive channels";
+	testSingleTxMultipleRxReconnect_(num_messages, num_channels, true);
+}
+
+TEST_F(TestAmqp, testSingleTxMultipleRxReconnect_long)
+{
+	constexpr size_t num_messages = 1E6;
+	constexpr size_t num_channels = 2;
+	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_channels << " receive channels";
+	testSingleTxMultipleRxReconnect_(num_messages, num_channels, true);
+}
+
+
 void TestAmqp::testMultipleTxRxChannelsAsync_(const size_t num_messages, const size_t num_channels)
 {
 	// Basic setup
@@ -690,39 +736,6 @@ void TestAmqp::testMultipleTxRxChannelsAsync_(const size_t num_messages, const s
 }
 
 
-TEST_F(TestAmqp, testSingleTxMultipleRx_short)
-{
-	constexpr size_t num_messages = 1E4;
-	constexpr size_t num_rx_channels = 2;
-	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_rx_channels << " receive channels";
-	testSingleTxMultipleRxReconnect_(num_messages, num_rx_channels, false);
-}
-
-TEST_F(TestAmqp, testSingleTxMultipleRx_long)
-{
-	constexpr size_t num_messages = 1E6;
-	constexpr size_t num_rx_channels = 2;
-	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_rx_channels << " receive channels";
-	testSingleTxMultipleRxReconnect_(num_messages, num_rx_channels, false);
-}
-
-TEST_F(TestAmqp, testSingleTxMultipleRxReconnect_short)
-{
-	constexpr size_t num_messages = 1E5;
-	constexpr size_t num_channels = 1;
-	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_channels << " receive channels";
-	testSingleTxMultipleRxReconnect_(num_messages, num_channels, true);
-}
-
-TEST_F(TestAmqp, testSingleTxMultipleRxReconnect_long)
-{
-	constexpr size_t num_messages = 1E6;
-	constexpr size_t num_channels = 2;
-	GTEST_LOG_(INFO) << "Test that we can receive " << num_messages << " messages successfully on " << num_channels << " receive channels";
-	testSingleTxMultipleRxReconnect_(num_messages, num_channels, true);
-}
-
-
 void TestAmqp::testSingleTxMultipleRx_(const size_t num_messages, const size_t num_rx_channels)
 {
 	// Basic setup
@@ -808,6 +821,18 @@ void TestAmqp::testSingleTxMultipleRx_(const size_t num_messages, const size_t n
 }
 
 
+/**
+ * The aim of this test is to verify the routing when we have a single transmit channel that is then routed to multiple
+ * different queues using routing keys.
+ *
+ * As part of this test you can specify
+ * @param num_messages - number of messages in order to enable longer stress tests
+ * @param num_rx_channels - number of rx channels to verify how the system will perform with increasing number of rx channels
+ * @param force_reconnects - whether to trigger reconnections during the test itself
+ * TODO Add in control of QOS prefetch count for RX and the equivalent on the TX side
+ * TODO Move the test name into the parameters passed in
+ * TODO Consider a holding class that contains all the configuration parameters so that these have defaults and optional config?
+ */
 void TestAmqp::testSingleTxMultipleRxReconnect_(const size_t num_messages, const size_t num_rx_channels, bool force_reconnects)
 {
 	try
@@ -849,10 +874,11 @@ void TestAmqp::testSingleTxMultipleRxReconnect_(const size_t num_messages, const
 
 		// Add in the logic for reconnecting
 		std::atomic num_forced_reconnections {0};
+		std::shared_ptr<std::jthread> force_reconnect_thread;
 		if (force_reconnects)
 		{
 			auto interval = std::chrono::milliseconds(20000);
-			auto forceDisconnectThread = forceCloseConnections(finish, interval, num_forced_reconnections);
+			force_reconnect_thread = forceCloseConnections(finish, interval, num_forced_reconnections);
 		}
 
 		// Wait until all receivers have finished or timed out
@@ -871,16 +897,22 @@ void TestAmqp::testSingleTxMultipleRxReconnect_(const size_t num_messages, const
 		// Ensure the send and receive sides have finished
 		send_thread.join();
 		receive_thread.join();
+		if (force_reconnect_thread)
+		{
+			force_reconnect_thread->join();
+		}
 
 		// We check the actual number of unique received messages as we can receive some identical messages when there are forced closures of the connection
-		GTEST_ASSERT_TRUE(std::ranges::all_of(rx_clients, [num_messages](const auto& entry) { return entry.rxMessagesSize() == num_messages;} ));
+		GTEST_ASSERT_TRUE(std::ranges::all_of(tx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfTransmittedMessages() >= num_messages;} )) << " the tx channel did not manage to transmit all messages";
+		GTEST_ASSERT_TRUE(std::ranges::all_of(tx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() == num_messages;} )) << " the tx channel did not manage to acknowledge all messages";;
+		GTEST_ASSERT_TRUE(std::ranges::all_of(rx_clients, [num_messages](const auto& entry) { return entry.rxMessagesSize() == num_messages;} ))  << " the rx channels did not manage to receive all messages";
 
 		// If we are forcing reconnects then check that it did something otherwise there was no point in setting the flag!
 		if (force_reconnects)
 		{
-			GTEST_ASSERT_GT(num_forced_reconnections.load(), 0);
+			GTEST_ASSERT_NE(num_forced_reconnections.load(), -1) << "Failed to force a reconnection using rabbitmqctl - can't force reconnections. Please investigate.";
+			GTEST_ASSERT_GT(num_forced_reconnections.load(), 0) << "No forced reconnections when these have been requested";
 		}
-
 	}
 	catch (std::runtime_error & error)
 	{

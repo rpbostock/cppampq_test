@@ -29,12 +29,14 @@ public:
 
     void emplace_back(const std::string &msg) {
         std::lock_guard<std::mutex> lock(mutex_);
-        rx_messages_.emplace_back(msg);
+        rx_messages_.emplace(msg);
+        LOG_DEBUG(getChannelName() << ": Received message " << msg << " total size is now " << rx_messages_.size());
     }
 
     void emplace_back(std::string &&msg) {
         std::lock_guard<std::mutex> lock(mutex_);
-        rx_messages_.emplace_back(std::move(msg));
+        rx_messages_.emplace(msg);
+        LOG_DEBUG(getChannelName() << ": Received message " << msg << " total size is now " << rx_messages_.size());
     }
 
     size_t rxMessagesSize() const {
@@ -43,5 +45,6 @@ public:
     }
 private:
     mutable std::mutex mutex_;
-    std::vector<std::string> rx_messages_;
+    // This needs to be a set so that all the messages are unique in case we get a repeated message for some reason.
+    std::set<std::string> rx_messages_;
 };
