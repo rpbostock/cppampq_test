@@ -10,6 +10,28 @@
 class TestAmqp : public ::testing::Test
 {
 public:
+	class ConfigQos
+	{
+	public:
+		ConfigQos() : tx_qos_prefetch_(1000)
+		, rx_qos_prefetch_(200)
+		, transmit_batch_size_(1000)
+		{}
+		virtual ~ConfigQos() = default;
+
+		ConfigQos& setTxQosPrefetch(const size_t& prefetch) { tx_qos_prefetch_ = prefetch; return *this; }
+		ConfigQos& setRxQosPrefetch(const size_t& prefetch) { rx_qos_prefetch_ = prefetch; return *this; }
+		ConfigQos& setTransmitBatchSize(const size_t& batch_size) { transmit_batch_size_ = batch_size; return *this; }
+
+		size_t getTxQosPrefetch() const { return tx_qos_prefetch_; }
+		size_t getRxQosPrefetch() const { return rx_qos_prefetch_; }
+		size_t getTransmitBatchSize() const { return transmit_batch_size_; }
+	private:
+		size_t tx_qos_prefetch_;
+		size_t rx_qos_prefetch_;
+		size_t transmit_batch_size_;
+	};
+
 	TestAmqp() {}
 	virtual ~TestAmqp() {}
 
@@ -35,36 +57,6 @@ public:
 
 private:
 
-	class TxRxThreadEntry
-	{
-	public:
-		explicit TxRxThreadEntry(const rmq::ChannelConfig& config) : config_(config), test_thread_(nullptr), finish_(false) {}
-		virtual ~TxRxThreadEntry() = default;
-
-		rmq::ChannelConfig getChannelConfig()
-		{
-			return config_;
-		}
-
-		void setTestThread(const std::shared_ptr<std::jthread>& test_thread)
-		{
-			test_thread_ = test_thread;
-		}
-
-		std::shared_ptr<std::jthread> getTestThread()
-		{
-			return test_thread_;
-		}
-
-		std::atomic<bool> &getFinish()
-		{
-			return finish_;
-		}
-	private:
-		rmq::ChannelConfig config_;
-		std::shared_ptr<std::jthread> test_thread_;
-		std::atomic<bool> finish_;
-	};
 
 	// Force connections to close
 	static std::shared_ptr<std::jthread> forceCloseConnections(std::atomic<bool> &finish,
@@ -75,8 +67,8 @@ private:
 	// Check up on connection, transmit and receive readiness at the beginning
 	static void checkConnectionAndChannels_(
 		const rmq::MyAmqpController &controller,
-		const std::vector<TxClientWrapper>& tx_clients = {},
-		const std::vector<TestRxClientWrapper>& rx_clients = {});
+		const std::vector<TxClientWrapper> &tx_clients = {},
+		const std::vector<TestRxClientWrapper> &rx_clients = {});
 
 	// Verification of start stop behaviour on the core connection and handler (excludes channels)
 	static bool testStartStopRealNoChannel_(int num_repeats, int num_threads);
@@ -105,22 +97,20 @@ private:
 	// Verification of receive items
 	FRIEND_TEST(TestAmqp, testReceiveChannel_short);
 	FRIEND_TEST(TestAmqp, testReceiveChannel_long);
-	static void testReceiveChannelAsync_(const size_t num_messages);
-	static std::jthread receive_data(std::vector<TestRxClientWrapper> &wrappers, std::atomic<bool>& finish_now);
-
 	FRIEND_TEST(TestAmqp, testTxRxMultipleSeparateChannels_short);
 	FRIEND_TEST(TestAmqp, testTxRxMultipleSeparateChannels_long);
-	static void testMultipleTxRxChannelsAsync_(size_t num_messages, size_t num_channels);
-	static void testSingleTxRxChannelsAsync_(rmq::MyAmqpController &controller, const std::shared_ptr<TxRxThreadEntry> &entry, size_t num_messages);
-	static std::chrono::seconds getReceiveTimeout_(const size_t num_messages);
-
 	FRIEND_TEST(TestAmqp, testSingleTxMultipleRx_short);
 	FRIEND_TEST(TestAmqp, testSingleTxMultipleRx_long);
 	FRIEND_TEST(TestAmqp, testSingleTxMultipleRxReconnect_short);
 	FRIEND_TEST(TestAmqp, testSingleTxMultipleRxReconnect_long);
-	static void testSingleTxMultipleRx_(size_t num_messages, size_t num_rx_channels);
-	static void testSingleTxMultipleRxReconnect_(size_t num_messages, size_t num_rx_channels, bool force_reconnects, size_t
-	                                             rx_qos_prefetch, size_t tx_qos_prefetch);
+	static void testSingleTxMultipleRxReconnect_(size_t num_messages, size_t num_rx_channels, bool force_reconnects, const ConfigQos &qos=ConfigQos());
+	static void testMultipleTxRxChannelsAsync_(size_t num_messages, size_t num_channels, bool force_reconnects, const ConfigQos &qos);
+	static void ensureMessageTransmissionAndReception(size_t num_messages, bool force_reconnects, const ConfigQos &qos,
+													  rmq::MyAmqpController &controller,
+													  std::vector<TxClientWrapper> &tx_clients,
+													  std::vector<TestRxClientWrapper> &rx_clients);
+	static std::chrono::seconds getReceiveTimeout_(const size_t num_messages);
+	static std::jthread receive_data(std::vector<TestRxClientWrapper> &rx_clients, std::atomic<bool> &finish, std::atomic<bool> &receive_complete);
 
 	FRIEND_TEST(TestAmqp, testMultipleTxRxHearbeat_short);
 	static void testMultipleTxRxHearbeat_(size_t num_messages, size_t num_channels);
