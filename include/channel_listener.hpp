@@ -18,6 +18,7 @@ public:
     virtual void onNumberOfAcknowledgedMessages(const std::string& channel_name, size_t num_acknowledged) = 0;
     virtual void onAcknowledgement(const std::string& channel_name, uint64_t delivery_tag, bool multiple) = 0;
     virtual void onConnect(const std::string& channel_name) = 0;
+    virtual void onDisconnect(const std::string& channel_name) = 0;
     virtual void onChannelStateChange(const std::string& channel_name, rmq::ChannelState state) = 0;
     virtual void onRemoteQueueSize(const std::string& channel_name, uint32_t queue_size) = 0;
 
@@ -56,6 +57,10 @@ public:
     }
 
     void onConnect(const std::string& channel_name) override
+    {
+    }
+
+    void onDisconnect(const std::string &channel_name) override
     {
     }
 

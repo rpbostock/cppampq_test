@@ -282,7 +282,7 @@ private:
             tcp_channel_->setQos(channel_config_.qos_prefetch_count, false)
             .onSuccess([this]()
             {
-              LOG_DEBUG(channel_name_ << ": Set QoS prefetch count to " << channel_config_.qos_prefetch_count);
+              LOG_DEBUG(channel_name_ << ": Set QoS prefetch count to " << static_cast<int>(channel_config_.qos_prefetch_count));
             })
             .onError([this](const char *message)
             {
@@ -389,6 +389,7 @@ public:
 
 	~MyAmqpTxChannel()
 	{
+		listener_->onDisconnect(channel_name_);
 	}
 
 	void deactivate() override

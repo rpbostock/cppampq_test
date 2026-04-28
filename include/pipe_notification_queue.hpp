@@ -8,11 +8,26 @@
 class NotificationPipeTransmitter
 {
 public:
-	explicit NotificationPipeTransmitter(evutil_socket_t notification_pipe, std::atomic<bool>& is_processed) : notification_pipe_(notification_pipe), is_processed_(is_processed) {}
+	explicit NotificationPipeTransmitter(evutil_socket_t notification_pipe, std::atomic<bool>& is_processed) : notification_pipe_(notification_pipe)
+	, is_processed_(is_processed)
+	{
+		LOG_DEBUG("Notification pipe created with fd: " << notification_pipe);
+	}
+
+	~NotificationPipeTransmitter()
+	{
+		std::lock_guard<std::mutex> lock(mutex_);
+		LOG_DEBUG("Notification pipe destroyed with fd: " << notification_pipe_);
+		notification_pipe_ = -1;
+	}
 
 	bool notify(const char cmd)
 	{
 		std::lock_guard<std::mutex> lock(mutex_);
+		if (notification_pipe_ == -1)
+		{
+			return false;
+		}
 
 		// To prevent the buffer being overloaded when we're transmitting a lot we need a mechanism of throttling what is sent
 		if (is_processed_.load())
@@ -42,6 +57,12 @@ public:
 			return false;
 		}
 	}
+
+	int get_fd() const
+	{
+		return notification_pipe_;
+	}
+
 private:
 	std::atomic<bool>& is_processed_;
 	std::set<char> chars_processing_;
@@ -69,7 +90,11 @@ public:
 
 	void setupNotificationPipe(const char notification_cmd, const std::shared_ptr<NotificationPipeTransmitter>  &notification_pipe)
 	{
-		LOG_DEBUG("Setting up notification pipe for command: " << notification_cmd);
+		if (notification_pipe)
+		{
+			LOG_DEBUG("Setting up notification pipe for command: " << notification_cmd << ", pipe fd is " << notification_pipe->get_fd());
+		}
+
 		notification_cmd_ = notification_cmd;
 		notification_pipe_ = notification_pipe;
 	}

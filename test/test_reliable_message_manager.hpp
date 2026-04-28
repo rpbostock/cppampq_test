@@ -42,13 +42,19 @@ public:
         return message_vec;
     }
 
-    void onConnect(const std::string& channel_name) override {
+    void onConnect(const std::string& channel_name) override
+    {
+        LOG_DEBUG("Connection: " << channel_name);
+    }
+
+    void onDisconnect(const std::string &channel_name) override
+    {
         std::lock_guard lock(mutex_);
         // Got to assume that we've lost all the transmitted data that wasn't acked
         to_tx_numbers_.insert(sent_messages_.begin(), sent_messages_.end());
         sent_messages_.clear();
-        LOG_DEBUG("Num messages, " << num_messages_ << ", num unsent, " << to_tx_numbers_.size()  << ", offset calculated, " << offset_due_to_reconnect_);
         offset_due_to_reconnect_ = num_messages_ - to_tx_numbers_.size();
+        LOG_DEBUG("Num messages, " << num_messages_ << ", num unsent, " << to_tx_numbers_.size() << ", offset calculated, " << offset_due_to_reconnect_);
     }
 
     /**
@@ -70,10 +76,11 @@ public:
                                 sent_messages_.upper_bound(local_val));
             num_acknowledged_ += size_before - sent_messages_.size();
         }
-        LOG_DEBUG("Connection: Num acknowledged, " << num_acknowledged_
+        LOG_DEBUG("Connection: "
             << ", num unacked, " << sent_messages_.size()
             << ", num unsent, " << to_tx_numbers_.size()
             << ", delivery_tag, " << static_cast<int>(delivery_tag)
+            << ", multiple, " << multiple ? "true" : "false"
             );
     }
 

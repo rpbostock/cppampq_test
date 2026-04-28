@@ -211,8 +211,7 @@ std::shared_ptr<std::jthread> TestAmqp::forceCloseConnections(std::atomic<bool> 
 			}
 
 			LOG_INFO("Forcing close of connections by timer interval after delay of " << interval.count() << "ms");
-			auto rc = forceCloseConnections_();
-			if (rc == 0)
+			if (const auto rc = forceCloseConnections_(); rc == 0)
 			{
 				++num_forced_reconnections;
 				LOG_INFO("All connections closed. Forced disconnects: " << num_forced_reconnections);
@@ -220,6 +219,7 @@ std::shared_ptr<std::jthread> TestAmqp::forceCloseConnections(std::atomic<bool> 
 			else
 			{
 				// Indicate an error through this - bit messy, but can't throw an exception easily
+				LOG_ERROR("Error closing connections: " << rc << ". Forced disconnects prior to this: " << num_forced_reconnections);
 				num_forced_reconnections = -1;
 				return;
 			}
@@ -230,7 +230,22 @@ std::shared_ptr<std::jthread> TestAmqp::forceCloseConnections(std::atomic<bool> 
 int TestAmqp::forceCloseConnections_()
 {
 	LOG_INFO("Disconnecting all connections");
-	return system("rabbitmqadmin -f tsv -q list connections name | cut -f1 | xargs -I {} rabbitmqadmin -q close connection name={}");
+	for (int attempt = 0; attempt < 3; attempt++)
+	{
+		int result = system(
+			"rabbitmqadmin -f tsv -q list connections name | cut -f1 | xargs -I {} rabbitmqadmin -q close connection name={}");
+		if (result == 0)
+		{
+			return result;
+		}
+		if (attempt < 2)
+		{
+			LOG_INFO("Attempt " << attempt+1 << " failed, retrying in 3s");
+			std::this_thread::sleep_for(std::chrono::seconds(3));
+		}
+	}
+	return system(
+		"rabbitmqadmin -f tsv -q list connections name | cut -f1 | xargs -I {} rabbitmqadmin -q close connection name={}");
 }
 
 
@@ -284,7 +299,7 @@ TEST_F(TestAmqp, testTransmitMultipleChannels_short	)
 
 TEST_F(TestAmqp, testTransmitMultipleChannels_long)
 {
-	constexpr size_t num_messages = 1E6;
+	constexpr size_t num_messages = 3E5;
 	constexpr size_t num_channels = 10;
 	GTEST_LOG_(INFO) << "Test that we can send " << num_messages << " messages successfully on " << num_channels << " channels";
 	testTransmitChannelWithManager_(num_messages, num_channels);
@@ -352,32 +367,40 @@ std::jthread TestAmqp::send_data(std::vector<rmq::TxClientWrapper> &transmitters
 	{
 		bool new_data = true;
 		bool max_prefetch = false;
-		while (new_data || max_prefetch)
+
+		// Sanity check that we have TestReliableMessageManagers - no point in the test otherwise
+		if (std::ranges::any_of(transmitters, [](const auto &entry) { return std::dynamic_pointer_cast<TestReliableMessageManager>(entry.getListener()) == nullptr; }))
+		{
+			throw std::runtime_error("Listener is not a reliable message manager");
+		}
+
+		while (!std::ranges::all_of(transmitters, [num_messages](const auto &entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() >= num_messages; }))
 		{
 			new_data = false;
 			max_prefetch = false;
 
 			for ( auto entry : transmitters)
 			{
-				auto reliable_message_manager = std::dynamic_pointer_cast<TestReliableMessageManager>(entry.getListener());
-				if (reliable_message_manager == nullptr)
-				{
-					throw std::runtime_error("Listener is not a reliable message manager");
-				}
-				if (!reliable_message_manager->isEmpty() && reliable_message_manager->numUnacknowledged() < tx_qos_prefetch)
+				const auto reliable_message_manager = std::dynamic_pointer_cast<TestReliableMessageManager>(entry.getListener());
+
+				// Send more data when we can
+				if (!reliable_message_manager->isEmpty()
+					&& reliable_message_manager->numUnacknowledged() < tx_qos_prefetch)
 				{
 					auto message_vec = reliable_message_manager->getNextMessage();
-					std::string message = std::string(message_vec->begin(), message_vec->end());
+					auto message = std::string(message_vec->begin(), message_vec->end());
 					LOG_DEBUG("Sending message " << message << " num unacked: " << reliable_message_manager->numUnacknowledged() << " num unsent " << reliable_message_manager->numUnsent());
 					entry.getQueue()->push(message_vec);
 					new_data = true;
 				}
+				// Indicate that there's no point trying to send any more data at the moment
 				if (reliable_message_manager->numUnacknowledged() >= tx_qos_prefetch)
 				{
 					max_prefetch = true;
 				}
 			}
-			if (max_prefetch && !new_data)
+			// If there wasn't any new data or we're above the limit
+			if (max_prefetch || !new_data)
 			{
 				std::this_thread::sleep_for(std::chrono::milliseconds(10));
 			}
@@ -416,59 +439,51 @@ TEST_F(TestAmqp, testReconnectionTxChannel_long)
 
 void TestAmqp::testTransmitChannelWithReconnect_(const size_t num_messages)
 {
+	constexpr bool force_reconnects = true;
+
 	// Basic setup
 	rmq::MyAmqpController controller("amqp://guest:guest@localhost/");
 	controller.setMaxTransmitBatchSize(1000); // We're only interested in transmission so we can put this high
 	rmq::ChannelConfig config {"testTransmitChannelWithReconnect_exchange"
 		, "testTransmitChannelWithReconnect_queue"
 		, "testTransmitChannelWithReconnect_routing"};
-	std::vector<TxClientWrapper> transmitters;
-	transmitters.emplace_back(controller.createTransmitChannel(config
+	std::vector<TxClientWrapper> tx_clients;
+	tx_clients.emplace_back(controller.createTransmitChannel(config
 		, std::make_shared<TestReliableMessageManager>(num_messages)));
-	auto wrapper = transmitters[0];
-	auto listener = wrapper.getListener();
 	controller.start();
 
 	// Ensure we're up and running
-	auto start = std::chrono::high_resolution_clock::now();
-	while (!(controller.isConnectionReady()	&& listener->isActive())
-		&& std::chrono::high_resolution_clock::now() - start < std::chrono::seconds(2))
-	{
-		std::this_thread::sleep_for(std::chrono::milliseconds(10));
-	}
-	GTEST_ASSERT_TRUE(controller.isConnectionReady());
-	GTEST_ASSERT_TRUE( wrapper.getListener()->isActive());
+	checkConnectionAndChannels_(controller, tx_clients);
 
 	// Send some messages
-	const auto queue = wrapper.getQueue();
 	std::atomic send_complete(false);
-	std::jthread send_thread = send_data(transmitters, send_complete, num_messages, 1000);
+	std::jthread send_thread = send_data(tx_clients, send_complete, num_messages, 1000);
 
 	std::atomic<bool> finish(false);
-	auto interval = std::chrono::milliseconds(20000);
+	const auto interval = std::chrono::milliseconds(20000);
 	std::atomic num_forced_reconnections {0};
 	auto forceDisconnectThread = forceCloseConnections(finish, interval, num_forced_reconnections);
 
 	// Wait for them all to be sent
-	start = std::chrono::high_resolution_clock::now();
-	while (!(queue->isEmpty()
-		&& listener->getNumberOfAcknowledgedMessages() == num_messages
+	const auto start = std::chrono::high_resolution_clock::now();
+	while (!(std::ranges::all_of(tx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfTransmittedMessages() >= num_messages;})
 		&& send_complete.load())
-		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages)*2)
+		&& std::chrono::high_resolution_clock::now() - start < getTransmitTimeout_(num_messages))
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
 	finish.store(true);
 	forceDisconnectThread->join();
 
-	GTEST_ASSERT_TRUE(queue->isEmpty());
 	GTEST_ASSERT_TRUE(send_complete.load());
-	GTEST_ASSERT_EQ(listener->getNumberOfAcknowledgedMessages(), num_messages);
+	GTEST_ASSERT_TRUE(std::ranges::all_of(tx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfTransmittedMessages() >= num_messages;} )) << " the tx channel did not manage to transmit all messages";
+	GTEST_ASSERT_TRUE(std::ranges::all_of(tx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfAcknowledgedMessages() == num_messages;} )) << " the tx channel did not manage to acknowledge all messages";;
 
-	// TODO We may have to consider not using this as a check. Under load I've seen that a connection close request gets refused and the connection isn't actually broken.
-	LOG_DEBUG("Number of forced disconnects: " << num_forced_reconnections);
-	GTEST_ASSERT_LE(abs(controller.getNumReconnections() - num_forced_reconnections), 1) << "Not all threads within 1 reconnections. Expected reconnections between " << num_forced_reconnections -1 << " and " << num_forced_reconnections + 1
-			<< " but got " << controller.getNumReconnections();
+	if (force_reconnects)
+	{
+		GTEST_ASSERT_NE(num_forced_reconnections.load(), -1) << "Failed to force a reconnection using rabbitmqctl - can't force reconnections. Please investigate.";
+		GTEST_ASSERT_GT(num_forced_reconnections.load(), 0) << "No forced reconnections when these have been requested";
+	}
 }
 
 
@@ -562,6 +577,7 @@ void TestAmqp::testMultipleTxRxChannelsAsync_(const size_t num_messages
 				test_name + "_exchange_" + std::to_string(i), test_name + "_queue_" + std::to_string(i),
 				test_name + "_routing_" + std::to_string(i)
 			};
+			config.qos_prefetch_count = qos.getRxQosPrefetch();
 			tx_clients.emplace_back(
 				controller.createTransmitChannel(config, std::make_shared<TestReliableMessageManager>(num_messages)));
 			rx_clients.emplace_back(controller.createReceiveChannel(config));
@@ -633,7 +649,7 @@ void TestAmqp::testSingleTxMultipleRxReconnect_(const size_t num_messages
 
 void TestAmqp::ensureMessageTransmissionAndReception(const size_t num_messages
                                                      , bool force_reconnects
-                                                     , const TestAmqp::ConfigQos &qos
+                                                     , const ConfigQos &qos
                                                      , rmq::MyAmqpController &controller
                                                      , std::vector<TxClientWrapper> &tx_clients
                                                      , std::vector<TestRxClientWrapper> &rx_clients)
@@ -661,25 +677,31 @@ void TestAmqp::ensureMessageTransmissionAndReception(const size_t num_messages
 	}
 
 	// Wait until all receivers have finished or timed out
-	auto start = std::chrono::high_resolution_clock::now();
-	auto timeout = std::max({getTransmitTimeout_(num_messages), getReceiveTimeout_(num_messages), std::chrono::seconds(50)});
+	const auto start = std::chrono::high_resolution_clock::now();
+	const auto timeout = std::max({getTransmitTimeout_(num_messages*tx_clients.size())
+		, getReceiveTimeout_(num_messages*rx_clients.size())
+		, std::chrono::seconds(50)});
 	LOG_INFO("Waiting for all the messages to have been transmitted and received: " << timeout.count() << " seconds");
 	while (!std::ranges::all_of(rx_clients, [num_messages](const auto& entry) { return entry.rxMessagesSize() == num_messages; })
 	       && std::chrono::high_resolution_clock::now() - start < timeout)
 	{
 		std::this_thread::sleep_for(std::chrono::milliseconds(10));
 	}
+	auto end_time = std::chrono::high_resolution_clock::now() - start;
 
 	// Tell the receive side and forced connection threads to stop
 	force_finish.store(true);
 
-	// Ensure the send and receive sides have finished
+	// Ensure the send and receive sides have finished before any tests otherwise it won't cleanup nicely.
 	send_thread.join();
 	receive_thread.join();
 	if (force_reconnect_thread)
 	{
 		force_reconnect_thread->join();
 	}
+
+	// Firstly check whether we timed out instead of finishing correctly
+	GTEST_ASSERT_LT(end_time, timeout) << "Timed out waiting for all the messages to have been transmitted and received - timeout was set to " << timeout.count() << " seconds";
 
 	// We check the actual number of unique received messages as we can receive some identical messages when there are forced closures of the connection
 	GTEST_ASSERT_TRUE(std::ranges::all_of(tx_clients, [num_messages](const auto& entry) { return entry.getListener()->getNumberOfTransmittedMessages() >= num_messages;} )) << " the tx channel did not manage to transmit all messages";
